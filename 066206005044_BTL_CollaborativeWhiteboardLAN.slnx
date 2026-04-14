@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="066206005044_BTL_WhiteboardClient/066206005044_BTL_WhiteboardClient.csproj" />
+  <Project Path="066206005044_BTL_WhiteboardContracts/066206005044_BTL_WhiteboardContracts.csproj" />
+  <Project Path="066206005044_BTL_WhiteboardServer/066206005044_BTL_WhiteboardServer.csproj" />
+</Solution>

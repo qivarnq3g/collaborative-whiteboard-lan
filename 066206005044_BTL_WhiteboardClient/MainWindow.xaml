@@ -1,0 +1,508 @@
+﻿<Window
+    x:Class="Btl.Whiteboard.Client.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="BTL - Collaborative Whiteboard">
+
+    <Grid
+        Padding="12"
+        ColumnSpacing="12"
+        KeyDown="MainWindow_KeyDown"
+        Background="{ThemeResource WindowBackgroundBrush}">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="280" />
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="380" />
+        </Grid.ColumnDefinitions>
+
+        <Border
+            Grid.Column="0"
+            BorderThickness="1"
+            Padding="10"
+            CornerRadius="8"
+            Background="{ThemeResource PanelBackgroundBrush}"
+            BorderBrush="{ThemeResource PanelStrokeBrush}">
+            <Grid RowSpacing="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <TextBlock Text="Collaborative Whiteboard" FontSize="18" FontWeight="SemiBold" />
+                <TextBlock Grid.Row="1" Text="LAN realtime room list" Opacity="0.8" />
+
+                <Border Grid.Row="2" x:Name="ConnectionBadgeBorder" BorderThickness="1" Padding="6" CornerRadius="6">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <Ellipse x:Name="ConnectionStateDot" Width="8" Height="8" VerticalAlignment="Center" />
+                        <TextBlock x:Name="ConnectionBadgeTextBlock" Text="Disconnected" />
+                    </StackPanel>
+                </Border>
+
+                <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <TextBlock Text="Theme" Width="80" VerticalAlignment="Center" />
+                    <ComboBox x:Name="ThemeComboBox" Width="170" SelectionChanged="ThemeComboBox_SelectionChanged">
+                        <ComboBoxItem Content="Auto" />
+                        <ComboBoxItem Content="Light" />
+                        <ComboBoxItem Content="Dark" />
+                    </ComboBox>
+                </StackPanel>
+
+                <StackPanel Grid.Row="4" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <TextBlock Text="Name" Width="80" VerticalAlignment="Center" />
+                    <TextBox x:Name="UserNameTextBox" Width="170" PlaceholderText="Your name" />
+                </StackPanel>
+
+                <Grid Grid.Row="5" ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Button x:Name="RefreshRoomsButton" Content="Refresh" Click="RefreshRoomsButton_Click" />
+                    <Button Grid.Column="1" x:Name="ConnectButton" Content="Connect" Click="ConnectButton_Click" />
+                </Grid>
+
+                <Grid Grid.Row="6" RowSpacing="6">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="Available Rooms" FontWeight="SemiBold" />
+                        <TextBlock Grid.Column="1" x:Name="RoomCountTextBlock" Text="0 rooms" />
+                    </Grid>
+                    <Grid Grid.Row="1">
+                        <ListView x:Name="RoomListView" AutomationProperties.Name="Available rooms list" />
+                        <TextBlock x:Name="RoomEmptyTextBlock" Text="No rooms yet. Start server and refresh." HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False" />
+                    </Grid>
+                </Grid>
+
+                <TextBlock Grid.Row="7" x:Name="ConnectionStatusTextBlock" Text="Disconnected" TextWrapping="Wrap" />
+            </Grid>
+        </Border>
+
+        <Border
+            Grid.Column="1"
+            BorderThickness="1"
+            CornerRadius="8"
+            Background="{ThemeResource PanelBackgroundBrush}"
+            BorderBrush="{ThemeResource PanelStrokeBrush}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <StackPanel Grid.Row="0" Spacing="8" Padding="10">
+                    <ScrollViewer HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Auto" VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled">
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Tools" FontWeight="SemiBold" />
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <ToggleButton x:Name="PencilToolToggleButton" Content="Pencil" Click="ToolToggleButton_Click" ToolTipService.ToolTip="Pencil (P)" />
+                                    <ToggleButton x:Name="LineToolToggleButton" Content="Line" Click="ToolToggleButton_Click" ToolTipService.ToolTip="Line (L)" />
+                                    <ToggleButton x:Name="RectangleToolToggleButton" Content="Rectangle" Click="ToolToggleButton_Click" ToolTipService.ToolTip="Rectangle (R)" />
+                                    <ToggleButton x:Name="EllipseToolToggleButton" Content="Ellipse" Click="ToolToggleButton_Click" ToolTipService.ToolTip="Ellipse (O)" />
+                                    <ToggleButton x:Name="EraserToolToggleButton" Content="Eraser" Click="ToolToggleButton_Click" ToolTipService.ToolTip="Eraser (E)" />
+                                </StackPanel>
+                            </StackPanel>
+
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Thickness" FontWeight="SemiBold" />
+                                <ComboBox x:Name="StrokeThicknessComboBox" Width="100" SelectionChanged="StrokeThicknessComboBox_SelectionChanged">
+                                    <ComboBoxItem Content="2 px" Tag="2" />
+                                    <ComboBoxItem Content="4 px" Tag="4" />
+                                    <ComboBoxItem Content="6 px" Tag="6" />
+                                    <ComboBoxItem Content="8 px" Tag="8" />
+                                    <ComboBoxItem Content="12 px" Tag="12" />
+                                </ComboBox>
+                            </StackPanel>
+
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Colors" FontWeight="SemiBold" />
+                                <StackPanel x:Name="ColorSwatchesPanel" Orientation="Horizontal" Spacing="4">
+                                    <Button Style="{StaticResource ColorSwatchButtonStyle}" Background="#1F6FEB" Tag="#1F6FEB" Click="ColorSwatchButton_Click" />
+                                    <Button Style="{StaticResource ColorSwatchButtonStyle}" Background="#10B981" Tag="#10B981" Click="ColorSwatchButton_Click" />
+                                    <Button Style="{StaticResource ColorSwatchButtonStyle}" Background="#F97316" Tag="#F97316" Click="ColorSwatchButton_Click" />
+                                    <Button Style="{StaticResource ColorSwatchButtonStyle}" Background="#D946EF" Tag="#D946EF" Click="ColorSwatchButton_Click" />
+                                    <Button Style="{StaticResource ColorSwatchButtonStyle}" Background="#EF4444" Tag="#EF4444" Click="ColorSwatchButton_Click" />
+                                    <Button Style="{StaticResource ColorSwatchButtonStyle}" Background="#06B6D4" Tag="#06B6D4" Click="ColorSwatchButton_Click" />
+                                    <Button Style="{StaticResource ColorSwatchButtonStyle}" Background="#111827" Tag="#111827" Click="ColorSwatchButton_Click" />
+                                    <Button Style="{StaticResource ColorSwatchButtonStyle}" Background="#FFFFFF" Tag="#FFFFFF" Click="ColorSwatchButton_Click" />
+                                </StackPanel>
+                                <TextBlock Text="Recent" Opacity="0.8" />
+                                <StackPanel x:Name="RecentColorSwatchesPanel" Orientation="Horizontal" Spacing="4" />
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <ComboBox x:Name="StrokeColorComboBox" Width="120" SelectionChanged="StrokeColorComboBox_SelectionChanged">
+                                        <ComboBoxItem Content="Blue" Tag="#1F6FEB" />
+                                        <ComboBoxItem Content="Green" Tag="#10B981" />
+                                        <ComboBoxItem Content="Orange" Tag="#F97316" />
+                                        <ComboBoxItem Content="Magenta" Tag="#D946EF" />
+                                        <ComboBoxItem Content="Red" Tag="#EF4444" />
+                                        <ComboBoxItem Content="Cyan" Tag="#06B6D4" />
+                                        <ComboBoxItem Content="Black" Tag="#111827" />
+                                        <ComboBoxItem Content="White" Tag="#FFFFFF" />
+                                    </ComboBox>
+                                    <TextBox x:Name="CustomColorTextBox" Width="100" PlaceholderText="#RRGGBB" KeyDown="CustomColorTextBox_KeyDown" />
+                                    <Button x:Name="ApplyCustomColorButton" Content="Apply" Click="ApplyCustomColorButton_Click" />
+                                    <Button x:Name="AdvancedColorPickerButton" Content="Picker">
+                                        <Button.Flyout>
+                                            <Flyout x:Name="AdvancedColorPickerFlyout" Closed="AdvancedColorPickerFlyout_Closed" Placement="BottomEdgeAlignedLeft">
+                                                <StackPanel Width="300" Spacing="8">
+                                                    <TextBlock Text="Drag to choose color, or type HEX." Opacity="0.8" />
+                                                    <ColorPicker x:Name="AdvancedColorPicker" IsAlphaEnabled="False" ColorChanged="AdvancedColorPicker_ColorChanged" />
+                                                </StackPanel>
+                                            </Flyout>
+                                        </Button.Flyout>
+                                    </Button>
+                                </StackPanel>
+                            </StackPanel>
+
+                            <StackPanel Spacing="4" Visibility="Collapsed">
+                                <TextBlock Text="Layers" FontWeight="SemiBold" />
+                                <ComboBox x:Name="ActiveLayerComboBox" Width="150" SelectionChanged="ActiveLayerComboBox_SelectionChanged" />
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <Button x:Name="AddLayerButton" Content="+ Layer" Click="AddLayerButton_Click" />
+                                    <Button x:Name="ToggleLayerVisibilityButton" Content="Show/Hide" Click="ToggleLayerVisibilityButton_Click" />
+                                    <Button x:Name="ToggleLayerLockButton" Content="Lock" Click="ToggleLayerLockButton_Click" />
+                                </StackPanel>
+                            </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                            <TextBlock Text="Shared Canvas" FontWeight="SemiBold" />
+                            <TextBlock x:Name="CurrentToolTextBlock" Text="Tool: Pencil" />
+                            <TextBlock x:Name="CanvasPointerTextBlock" Text="X:0 Y:0" />
+                        </StackPanel>
+
+                        <Button Grid.Column="1" x:Name="UndoButton" Content="Undo" Click="UndoButton_Click" />
+                        <Button Grid.Column="2" x:Name="RedoButton" Content="Redo" Click="RedoButton_Click" />
+
+                        <Border Grid.Column="3" x:Name="CanvasConnectionBadgeBorder" BorderThickness="1" Padding="6" CornerRadius="6">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <Ellipse x:Name="CanvasConnectionStateDot" Width="8" Height="8" VerticalAlignment="Center" />
+                                <TextBlock x:Name="CanvasConnectionTextBlock" Text="Disconnected" />
+                            </StackPanel>
+                        </Border>
+
+                        <TextBlock Grid.Column="4" x:Name="CanvasOnlineCountTextBlock" Text="0 online" VerticalAlignment="Center" />
+                    </Grid>
+
+                </StackPanel>
+
+                <Border
+                    Grid.Row="1"
+                    x:Name="CanvasHost"
+                    Background="{ThemeResource CanvasBackgroundBrush}"
+                    BorderBrush="{ThemeResource PanelStrokeBrush}"
+                    BorderThickness="1"
+                    PointerPressed="CanvasHost_PointerPressed"
+                    PointerMoved="CanvasHost_PointerMoved"
+                    PointerReleased="CanvasHost_PointerReleased"
+                    PointerCanceled="CanvasHost_PointerCanceled">
+                    <Grid>
+                        <Canvas x:Name="DrawingCanvas" AutomationProperties.Name="Shared drawing canvas" />
+                        <TextBlock x:Name="CanvasHintTextBlock" Text="Connect to a room to start drawing in realtime" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Grid>
+                </Border>
+            </Grid>
+        </Border>
+
+        <Border
+            Grid.Column="2"
+            BorderThickness="1"
+            Padding="8"
+            CornerRadius="8"
+            Background="{ThemeResource PanelBackgroundBrush}"
+            BorderBrush="{ThemeResource PanelStrokeBrush}">
+            <TabView
+                x:Name="RightPanelTabView"
+                IsAddTabButtonVisible="False"
+                SelectedIndex="0"
+                TabWidthMode="Equal"
+                Background="{ThemeResource PanelBackgroundBrush}"
+                BorderBrush="{ThemeResource PanelStrokeBrush}"
+                ToolTipService.ToolTip="Panel tabs: F1 Layers, F2 Users, F3 Chat">
+                <TabViewItem Header="Layers">
+                    <Grid
+                        RowSpacing="10"
+                        Padding="6"
+                        Background="{ThemeResource PanelBackgroundBrush}">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Layers" FontWeight="SemiBold" />
+                            <TextBlock Grid.Column="1" x:Name="LayersCountTextBlock" Text="0" />
+                        </Grid>
+
+                        <Border Grid.Row="1" Style="{StaticResource LayerActionPanelStyle}">
+                            <StackPanel Orientation="Horizontal" Spacing="4" HorizontalAlignment="Left">
+                                <Button x:Name="LayerPanelAddButton" Width="30" Style="{StaticResource LayerActionButtonStyle}" Click="LayerPanelAddButton_Click">
+                                    <FontIcon Glyph="&#xE710;" Style="{StaticResource LayerActionIconStyle}" />
+                                </Button>
+
+                                <Button x:Name="LayerDuplicateButton" Width="30" Style="{StaticResource LayerActionButtonStyle}" Click="LayerDuplicateButton_Click">
+                                    <FontIcon Glyph="&#xE8C8;" Style="{StaticResource LayerActionIconStyle}" />
+                                </Button>
+
+                                <Button x:Name="LayerDeleteButton" Width="30" Style="{StaticResource LayerActionDeleteButtonStyle}" Click="LayerDeleteButton_Click">
+                                    <FontIcon Glyph="&#xE74D;" Style="{StaticResource LayerActionIconStyle}" />
+                                </Button>
+
+                                <Rectangle Width="1" Height="18" Margin="4,0" VerticalAlignment="Center" Fill="{ThemeResource PanelStrokeBrush}" />
+
+                                <Button x:Name="LayerMoveUpButton" Width="30" Style="{StaticResource LayerActionButtonStyle}" Click="LayerMoveUpButton_Click">
+                                    <FontIcon Glyph="&#xE70E;" Style="{StaticResource LayerActionIconStyle}" />
+                                </Button>
+
+                                <Button x:Name="LayerMoveDownButton" Width="30" Style="{StaticResource LayerActionButtonStyle}" Click="LayerMoveDownButton_Click">
+                                    <FontIcon Glyph="&#xE70D;" Style="{StaticResource LayerActionIconStyle}" />
+                                </Button>
+
+                                <Button x:Name="LayerMergeDownButton" Width="30" Style="{StaticResource LayerActionButtonStyle}" Click="LayerMergeDownButton_Click">
+                                    <FontIcon Glyph="&#xE81E;" Style="{StaticResource LayerActionIconStyle}" />
+                                </Button>
+                            </StackPanel>
+                        </Border>
+
+                        <Grid Grid.Row="2">
+                            <ListView
+                                x:Name="LayersListView"
+                                AllowDrop="True"
+                                CanDragItems="True"
+                                CanReorderItems="True"
+                                DragItemsCompleted="LayersListView_DragItemsCompleted"
+                                AutomationProperties.Name="Layers list"
+                                SelectionMode="Extended"
+                                SelectionChanged="LayersListView_SelectionChanged">
+                                <ListView.Resources>
+                                    <SolidColorBrush x:Key="ListViewItemBackground" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ListViewItemBackgroundPointerOver" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ListViewItemBackgroundPressed" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ListViewItemBackgroundSelected" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPointerOver" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPressed" Color="Transparent" />
+                                </ListView.Resources>
+                                <ListView.ItemContainerStyle>
+                                    <Style TargetType="ListViewItem">
+                                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                        <Setter Property="Background" Value="Transparent" />
+                                        <Setter Property="BorderBrush" Value="Transparent" />
+                                        <Setter Property="Foreground" Value="{ThemeResource PrimaryTextBrush}" />
+                                        <Setter Property="Padding" Value="6,4" />
+                                        <Setter Property="MinHeight" Value="36" />
+                                    </Style>
+                                </ListView.ItemContainerStyle>
+                                <ListView.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border
+                                            CornerRadius="6"
+                                            Padding="6,4"
+                                            Background="{Binding RowBackgroundBrush}"
+                                            BorderBrush="{Binding RowBorderBrush}"
+                                            BorderThickness="{Binding RowBorderThickness}">
+                                            <Grid ColumnSpacing="8" MinHeight="32" Background="Transparent">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+
+                                                <ToggleButton
+                                                    x:Name="LayerVisibilityToggleButton"
+                                                    Grid.Column="0"
+                                                    Style="{StaticResource LayerRowToggleStyle}"
+                                                    IsChecked="{Binding IsVisible, Mode=TwoWay}"
+                                                    Checked="LayerVisibilityCheckBox_Changed"
+                                                    Unchecked="LayerVisibilityCheckBox_Changed"
+                                                    ToolTipService.ToolTip="{Binding VisibilityTooltip}">
+                                                    <Grid Width="16" Height="16">
+                                                        <FontIcon Glyph="&#xE890;" FontSize="14" />
+                                                        <Line
+                                                            X1="12"
+                                                            Y1="3"
+                                                            X2="5"
+                                                            Y2="12"
+                                                            Stroke="{Binding Foreground, ElementName=LayerVisibilityToggleButton}"
+                                                            StrokeThickness="1.8"
+                                                            StrokeStartLineCap="Round"
+                                                            StrokeEndLineCap="Round"
+                                                            Visibility="{Binding VisibilitySlashVisibility}" />
+                                                    </Grid>
+                                                </ToggleButton>
+
+                                                <ToggleButton
+                                                    Grid.Column="1"
+                                                    Style="{StaticResource LayerRowToggleStyle}"
+                                                    IsChecked="{Binding IsLocked, Mode=TwoWay}"
+                                                    Checked="LayerLockCheckBox_Changed"
+                                                    Unchecked="LayerLockCheckBox_Changed"
+                                                    ToolTipService.ToolTip="{Binding LockTooltip}">
+                                                    <FontIcon Glyph="{Binding LockGlyph}" />
+                                                </ToggleButton>
+
+                                                <Grid Grid.Column="2" HorizontalAlignment="Stretch" VerticalAlignment="Center">
+                                                    <TextBlock
+                                                        Text="{Binding Name}"
+                                                        Foreground="{ThemeResource PrimaryTextBrush}"
+                                                        FontWeight="{Binding NameFontWeight}"
+                                                        Margin="8,0"
+                                                        VerticalAlignment="Center"
+                                                        TextTrimming="CharacterEllipsis"
+                                                        Visibility="{Binding NameDisplayVisibility}"
+                                                        DoubleTapped="LayerNameTextBlock_DoubleTapped" />
+
+                                                    <TextBox
+                                                        x:Name="LayerNameEditorTextBox"
+                                                        Style="{StaticResource LayerRowNameTextBoxStyle}"
+                                                        HorizontalAlignment="Stretch"
+                                                        VerticalAlignment="Center"
+                                                        Text="{Binding Name, Mode=TwoWay}"
+                                                        KeyDown="LayerNameTextBox_KeyDown"
+                                                        LostFocus="LayerNameTextBox_LostFocus"
+                                                        Visibility="{Binding NameEditorVisibility}" />
+                                                </Grid>
+                                            </Grid>
+                                        </Border>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+                            <TextBlock
+                                x:Name="LayersEmptyTextBlock"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                IsHitTestVisible="False"
+                                Text="No layers yet" />
+                        </Grid>
+
+                        <Border
+                            Grid.Row="3"
+                            Padding="8,6"
+                            CornerRadius="6"
+                            Background="{ThemeResource PanelHeaderBackgroundBrush}"
+                            BorderBrush="{ThemeResource PanelStrokeBrush}"
+                            BorderThickness="1">
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock
+                                    Text="Opacity"
+                                    VerticalAlignment="Center"
+                                    Foreground="{ThemeResource PrimaryTextBrush}" />
+                                <Slider
+                                    x:Name="LayerOpacitySlider"
+                                    Grid.Column="1"
+                                    Minimum="5"
+                                    Maximum="100"
+                                    Value="100"
+                                    StepFrequency="1"
+                                    Foreground="{ThemeResource ColorSwatchSelectedBorderBrush}"
+                                    Background="{ThemeResource PanelStrokeBrush}"
+                                    ValueChanged="LayerOpacitySlider_ValueChanged" />
+                                <TextBlock
+                                    x:Name="LayerOpacityValueTextBlock"
+                                    Grid.Column="2"
+                                    Text="100%"
+                                    VerticalAlignment="Center"
+                                    Foreground="{ThemeResource PrimaryTextBrush}" />
+                            </Grid>
+                        </Border>
+                    </Grid>
+                </TabViewItem>
+
+                <TabViewItem Header="Users">
+                    <Grid
+                        RowSpacing="10"
+                        Padding="6"
+                        Background="{ThemeResource PanelBackgroundBrush}">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Online Users" FontWeight="SemiBold" />
+                            <TextBlock Grid.Column="1" x:Name="OnlineUsersCountTextBlock" Text="0" />
+                        </Grid>
+
+                        <Grid Grid.Row="1">
+                            <ListView x:Name="OnlineUsersListView" AutomationProperties.Name="Online users list" />
+                            <TextBlock x:Name="OnlineUsersEmptyTextBlock" Text="No active users yet" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False" />
+                        </Grid>
+                    </Grid>
+                </TabViewItem>
+
+                <TabViewItem Header="Chat">
+                    <Grid
+                        RowSpacing="10"
+                        Padding="6"
+                        Background="{ThemeResource PanelBackgroundBrush}">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Text="Group Chat" FontWeight="SemiBold" />
+
+                        <Grid Grid.Row="1">
+                            <ListView x:Name="ChatListView" AutomationProperties.Name="Group chat messages" SelectionMode="None">
+                                <ListView.ItemContainerTransitions>
+                                    <TransitionCollection />
+                                </ListView.ItemContainerTransitions>
+                            </ListView>
+                            <TextBlock x:Name="ChatEmptyTextBlock" Text="Messages will appear here after you connect" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" IsHitTestVisible="False" />
+                        </Grid>
+
+                        <Grid Grid.Row="2" ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="ChatInputTextBox" PlaceholderText="Type message and press Enter" KeyDown="ChatInputTextBox_KeyDown" AutomationProperties.Name="Chat message input" />
+                            <Button Grid.Column="1" x:Name="SendChatButton" Content="Send" Click="SendChatButton_Click" />
+                        </Grid>
+                    </Grid>
+                </TabViewItem>
+            </TabView>
+        </Border>
+    </Grid>
+</Window>

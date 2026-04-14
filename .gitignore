@@ -1,0 +1,16 @@
+.github/
+.vs/
+.vscode/
+**/bin/
+**/obj/
+*.csproj.user
+*.sln.user
+*.pdb
+build_diag.log
+WindowsAppRuntimeInstall-x64.exe
+**/chatagent-temp/
+**/Validation/Debug/
+.env
+.env.local
+.DS_Store
+Thumbs.db
