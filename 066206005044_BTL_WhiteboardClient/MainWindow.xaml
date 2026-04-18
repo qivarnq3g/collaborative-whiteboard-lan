@@ -9,8 +9,10 @@
 
     <Grid
         Padding="12"
+                    PointerCaptureLost="CanvasHost_PointerCaptureLost"
         ColumnSpacing="12"
         KeyDown="MainWindow_KeyDown"
+        KeyUp="MainWindow_KeyUp"
         Background="{ThemeResource WindowBackgroundBrush}">
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="280" />
@@ -221,8 +223,9 @@
                     PointerPressed="CanvasHost_PointerPressed"
                     PointerMoved="CanvasHost_PointerMoved"
                     PointerReleased="CanvasHost_PointerReleased"
-                    PointerCanceled="CanvasHost_PointerCanceled">
-                    <Grid>
+                    PointerCanceled="CanvasHost_PointerCanceled"
+                    PointerWheelChanged="CanvasHost_PointerWheelChanged">
+                    <Grid x:Name="CanvasViewportGrid" SizeChanged="CanvasViewportGrid_SizeChanged">
                         <Canvas x:Name="DrawingCanvas" AutomationProperties.Name="Shared drawing canvas" />
                         <TextBlock x:Name="CanvasHintTextBlock" Text="Connect to a room to start drawing in realtime" HorizontalAlignment="Center" VerticalAlignment="Center" />
                     </Grid>

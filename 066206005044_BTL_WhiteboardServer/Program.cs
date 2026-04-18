@@ -133,6 +133,9 @@ internal sealed partial class WhiteboardServer
 	private const double MaxStrokeThickness = 24;
 	private const int MaxHistoryCommands = 12_000;
 	private const int TrimHistoryToCommands = 9_000;
+	private static readonly TimeSpan ClientSendTimeout = TimeSpan.FromSeconds(3);
+	private static readonly TimeSpan HistoryActionWindow = TimeSpan.FromSeconds(1);
+	private static readonly int MaxHistoryActionsPerWindow = 12;
 
 	private readonly string serverName;
 	private readonly string roomName;
@@ -143,6 +146,7 @@ internal sealed partial class WhiteboardServer
 	private readonly List<StrokeCommandPayload> strokeHistory = new();
 	private readonly Stack<List<StrokeCommandPayload>> redoHistory = new();
 	private readonly Dictionary<string, string> activeStrokeOwners = new(StringComparer.Ordinal);
+	private readonly Queue<DateTimeOffset> historyActionSamples = new();
 	private readonly object historyLock = new();
 
 	private long sequence;
@@ -462,7 +466,8 @@ internal sealed partial class WhiteboardServer
 			NextSequence(),
 			new ChatPayload(sender.UserName, text));
 
-		await BroadcastAsync(outgoingEnvelope, exceptUserId: null, cancellationToken).ConfigureAwait(false);
+		bool waitForCompletion = incomingEnvelope.Type != WhiteboardMessageType.StrokePoint;
+		await BroadcastAsync(outgoingEnvelope, exceptUserId: null, cancellationToken, waitForCompletion).ConfigureAwait(false);
 	}
 
 	private async Task ProcessPingAsync(
@@ -487,8 +492,13 @@ internal sealed partial class WhiteboardServer
 		CancellationToken cancellationToken)
 	{
 		if (incomingEnvelope.Type == WhiteboardMessageType.StrokePoint &&
-			!sender.TryConsumeStrokeSlot(DateTimeOffset.UtcNow))
+			!sender.TryConsumeStrokeSlot(DateTimeOffset.UtcNow, out bool shouldReportThrottle))
 		{
+			if (shouldReportThrottle)
+			{
+				Console.WriteLine($"[TCP] Stroke throttle for {sender.UserName} ({sender.UserId[..6]}): stroke point rate exceeded.");
+			}
+
 			return;
 		}
 
@@ -549,45 +559,64 @@ internal sealed partial class WhiteboardServer
 					normalizedCommand.LayerId))
 		};
 
+		if (incomingEnvelope.Type == WhiteboardMessageType.StrokeEnd)
+		{
+			Console.WriteLine($"[TCP] StrokeEnd accepted from {sender.UserName} ({sender.UserId[..6]}), strokeId={normalizedCommand.StrokeId}.");
+		}
+
 		await BroadcastAsync(outgoingEnvelope, exceptUserId: null, cancellationToken).ConfigureAwait(false);
 	}
 
 	private async Task ProcessUndoAsync(ConnectedClient sender, CancellationToken cancellationToken)
 	{
-		if (!sender.TryConsumeChatSlot(DateTimeOffset.UtcNow))
+		Console.WriteLine($"[TCP] Undo request from {sender.UserName} ({sender.UserId[..6]}).");
+
+		if (!TryConsumeHistoryActionSlot(DateTimeOffset.UtcNow))
 		{
+			Console.WriteLine($"[TCP] Undo throttled for {sender.UserName} ({sender.UserId[..6]}).");
 			return;
 		}
 
 		if (HasActiveStrokeInProgress())
 		{
+			Console.WriteLine($"[TCP] Undo deferred for {sender.UserName} ({sender.UserId[..6]}): active stroke in progress.");
 			return;
 		}
 
 		if (!TryUndoLastStroke())
 		{
+			Console.WriteLine($"[TCP] Undo ignored for {sender.UserName} ({sender.UserId[..6]}): no stroke history to undo.");
 			return;
 		}
+
+		Console.WriteLine($"[TCP] Undo applied for {sender.UserName} ({sender.UserId[..6]}).");
 
 		await BroadcastCanvasSnapshotAsync(cancellationToken).ConfigureAwait(false);
 	}
 
 	private async Task ProcessRedoAsync(ConnectedClient sender, CancellationToken cancellationToken)
 	{
-		if (!sender.TryConsumeChatSlot(DateTimeOffset.UtcNow))
+		Console.WriteLine($"[TCP] Redo request from {sender.UserName} ({sender.UserId[..6]}).");
+
+		if (!TryConsumeHistoryActionSlot(DateTimeOffset.UtcNow))
 		{
+			Console.WriteLine($"[TCP] Redo throttled for {sender.UserName} ({sender.UserId[..6]}).");
 			return;
 		}
 
 		if (HasActiveStrokeInProgress())
 		{
+			Console.WriteLine($"[TCP] Redo deferred for {sender.UserName} ({sender.UserId[..6]}): active stroke in progress.");
 			return;
 		}
 
 		if (!TryRedoLastStroke())
 		{
+			Console.WriteLine($"[TCP] Redo ignored for {sender.UserName} ({sender.UserId[..6]}): no redo history.");
 			return;
 		}
+
+		Console.WriteLine($"[TCP] Redo applied for {sender.UserName} ({sender.UserId[..6]}).");
 
 		await BroadcastCanvasSnapshotAsync(cancellationToken).ConfigureAwait(false);
 	}
@@ -657,28 +686,78 @@ internal sealed partial class WhiteboardServer
 		return new PresenceSnapshotPayload(users);
 	}
 
-	private async Task BroadcastAsync(
+	private Task BroadcastAsync(
 		WhiteboardEnvelope envelope,
 		string? exceptUserId,
-		CancellationToken cancellationToken)
+		CancellationToken cancellationToken,
+		bool waitForCompletion = true)
 	{
 		ConnectedClient[] recipients = clients.Values
 			.Where(client => !string.Equals(client.UserId, exceptUserId, StringComparison.Ordinal))
 			.ToArray();
 
-		List<Task> tasks = new(recipients.Length);
-		foreach (ConnectedClient recipient in recipients)
+		Task<ConnectedClient?>[] tasks = new Task<ConnectedClient?>[recipients.Length];
+		for (int index = 0; index < recipients.Length; index++)
 		{
-			tasks.Add(SendToClientAsync(recipient, envelope, cancellationToken));
+			tasks[index] = SendToClientSafelyAsync(recipients[index], envelope, cancellationToken);
 		}
 
+		if (!waitForCompletion)
+		{
+			_ = HandleBroadcastFailuresAsync(tasks);
+			return Task.CompletedTask;
+		}
+
+		return HandleBroadcastFailuresAsync(tasks);
+	}
+
+	private async Task HandleBroadcastFailuresAsync(IReadOnlyCollection<Task<ConnectedClient?>> tasks)
+	{
+		if (tasks.Count == 0)
+		{
+			return;
+		}
+
+		ConnectedClient?[] failedRecipients = await Task.WhenAll(tasks).ConfigureAwait(false);
+		foreach (ConnectedClient? failedRecipient in failedRecipients)
+		{
+			if (failedRecipient is null)
+			{
+				continue;
+			}
+
+			_ = Task.Run(async () =>
+			{
+				try
+				{
+					await UnregisterClientAsync(failedRecipient, CancellationToken.None).ConfigureAwait(false);
+				}
+				catch (Exception exception)
+				{
+					Console.WriteLine($"[TCP] Cleanup warning for {failedRecipient.UserName}: {exception.Message}");
+				}
+			}, CancellationToken.None);
+		}
+	}
+
+	private async Task<ConnectedClient?> SendToClientSafelyAsync(
+		ConnectedClient client,
+		WhiteboardEnvelope envelope,
+		CancellationToken cancellationToken)
+	{
 		try
 		{
-			await Task.WhenAll(tasks).ConfigureAwait(false);
+			await SendToClientAsync(client, envelope, cancellationToken).ConfigureAwait(false);
+			return null;
+		}
+		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+		{
+			return null;
 		}
 		catch (Exception exception)
 		{
-			Console.WriteLine($"[TCP] Broadcast warning: {exception.Message}");
+			Console.WriteLine($"[TCP] Send failure to {client.UserName} ({client.UserId[..6]}): {exception.Message}");
+			return client;
 		}
 	}
 
@@ -687,14 +766,37 @@ internal sealed partial class WhiteboardServer
 		WhiteboardEnvelope envelope,
 		CancellationToken cancellationToken)
 	{
-		await client.SendGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+		using CancellationTokenSource timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+		timeoutSource.CancelAfter(ClientSendTimeout);
+
+		await client.SendGate.WaitAsync(timeoutSource.Token).ConfigureAwait(false);
 		try
 		{
-			await FrameProtocol.WriteAsync(client.Stream, envelope, cancellationToken).ConfigureAwait(false);
+			await FrameProtocol.WriteAsync(client.Stream, envelope, timeoutSource.Token).ConfigureAwait(false);
 		}
 		finally
 		{
 			client.SendGate.Release();
+		}
+	}
+
+	private bool TryConsumeHistoryActionSlot(DateTimeOffset now)
+	{
+		lock (historyLock)
+		{
+			DateTimeOffset lowerBound = now - HistoryActionWindow;
+			while (historyActionSamples.Count > 0 && historyActionSamples.Peek() < lowerBound)
+			{
+				historyActionSamples.Dequeue();
+			}
+
+			if (historyActionSamples.Count >= MaxHistoryActionsPerWindow)
+			{
+				return false;
+			}
+
+			historyActionSamples.Enqueue(now);
+			return true;
 		}
 	}
 }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -15,22 +16,70 @@ namespace Btl.Whiteboard.Client;
 
 public sealed partial class MainWindow
 {
+    private void CanvasHost_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
+    {
+        if (!IsAltPressedForZoom())
+        {
+            return;
+        }
+
+        e.Handled = true;
+
+        int wheelDelta = e.GetCurrentPoint(CanvasHost).Properties.MouseWheelDelta;
+        if (wheelDelta == 0)
+        {
+            return;
+        }
+
+        double currentZoom = canvasZoom;
+        double zoomFactor = Math.Pow(CanvasZoomStepMultiplier, wheelDelta / 120.0);
+        double targetZoom = ClampCanvasZoom(currentZoom * zoomFactor);
+        if (Math.Abs(targetZoom - currentZoom) < 0.0001)
+        {
+            return;
+        }
+
+        Point anchorOnHost = e.GetCurrentPoint(CanvasHost).Position;
+        double worldX = (anchorOnHost.X - canvasPanX) / currentZoom;
+        double worldY = (anchorOnHost.Y - canvasPanY) / currentZoom;
+
+        canvasZoom = targetZoom;
+        canvasPanX = anchorOnHost.X - (worldX * canvasZoom);
+        canvasPanY = anchorOnHost.Y - (worldY * canvasZoom);
+
+        ApplyCanvasViewportTransform();
+        UpdateToolStatusText();
+    }
+
     private async void CanvasHost_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
+        var currentPointOnHost = e.GetCurrentPoint(CanvasHost);
+        bool isMousePointer = e.Pointer.PointerDeviceType == Microsoft.UI.Input.PointerDeviceType.Mouse;
+        bool isLeftButtonPressed = currentPointOnHost.Properties.IsLeftButtonPressed;
+
+        if (isMousePointer && IsSpacePressedForPan() && isLeftButtonPressed)
+        {
+            isSpacePanning = true;
+            spacePanStartHostPoint = currentPointOnHost.Position;
+            spacePanStartX = canvasPanX;
+            spacePanStartY = canvasPanY;
+            CanvasHost.CapturePointer(e.Pointer);
+            e.Handled = true;
+            return;
+        }
+
         if (!session.IsConnected)
         {
             SetConnectionState("Disconnected", "Connect to a room before drawing.");
             return;
         }
 
-        var currentPointOnHost = e.GetCurrentPoint(CanvasHost);
-        bool isMousePointer = e.Pointer.PointerDeviceType == Microsoft.UI.Input.PointerDeviceType.Mouse;
-        if (isMousePointer && !currentPointOnHost.Properties.IsLeftButtonPressed)
+        if (isMousePointer && !isLeftButtonPressed)
         {
             return;
         }
 
-        Point point = NormalizeCanvasPoint(e.GetCurrentPoint(DrawingCanvas).Position);
+        Point point = GetCanvasPointFromHostPointer(e);
         UpdateCanvasPointerText(point);
 
         LayerState activeLayer = GetActiveLayerState();
@@ -80,6 +129,8 @@ public sealed partial class MainWindow
         hasSentActiveStrokeStart = false;
         hasLastSentStrokePoint = true;
         lastSentStrokePoint = point;
+        hasLastQueuedStrokePoint = true;
+        lastQueuedStrokePoint = point;
         CanvasHost.CapturePointer(e.Pointer);
         strokeSendTimer.Stop();
 
@@ -92,6 +143,8 @@ public sealed partial class MainWindow
             activeStrokeThickness,
             activeStrokeLayerId));
 
+        CancellationToken strokeSendToken = BeginActiveStrokeSendSession();
+
         activeStrokeStartSendTask = SafeSendStrokeAsync(() => session.SendStrokeStartAsync(
             activeStrokeId,
             point.X,
@@ -100,7 +153,7 @@ public sealed partial class MainWindow
             activeStrokeColorHex,
             activeStrokeThickness,
             activeStrokeLayerId,
-            CancellationToken.None));
+            strokeSendToken));
 
         bool strokeStartSent = await EnsureActiveStrokeStartSentAsync();
         if (!strokeStartSent)
@@ -108,7 +161,8 @@ public sealed partial class MainWindow
             isDrawing = false;
             activeStrokeId = null;
             pendingStrokePoints.Clear();
-            CanvasHost.ReleasePointerCapture(e.Pointer);
+            CancelActiveStrokeSendSession();
+            TryReleasePointerCapture(e, "PointerPressed stroke start not sent");
             return;
         }
 
@@ -120,6 +174,17 @@ public sealed partial class MainWindow
 
     private void CanvasHost_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
+        if (isSpacePanning)
+        {
+            Point hostPoint = e.GetCurrentPoint(CanvasHost).Position;
+            canvasPanX = spacePanStartX + (hostPoint.X - spacePanStartHostPoint.X);
+            canvasPanY = spacePanStartY + (hostPoint.Y - spacePanStartHostPoint.Y);
+            ApplyCanvasViewportTransform();
+            UpdateToolStatusText();
+            e.Handled = true;
+            return;
+        }
+
         IReadOnlyList<Point> sampledPoints = GetPointerSamplePoints(e);
         Point point = sampledPoints[^1];
         UpdateCanvasPointerText(point);
@@ -131,7 +196,7 @@ public sealed partial class MainWindow
 
         bool isMousePointer = e.Pointer.PointerDeviceType == Microsoft.UI.Input.PointerDeviceType.Mouse;
         bool isLeftButtonPressed = e.GetCurrentPoint(CanvasHost).Properties.IsLeftButtonPressed;
-        if (isMousePointer && !isLeftButtonPressed)
+        if (isMousePointer && !isLeftButtonPressed && !isStrokeFinalizing && !isWindowClosed)
         {
             CanvasHost_PointerReleased(sender, e);
             return;
@@ -162,102 +227,204 @@ public sealed partial class MainWindow
                 activeStrokeThickness,
                 activeStrokeLayerId));
 
+            if (!ShouldQueueStrokePoint(sampledPoint))
+            {
+                continue;
+            }
+
+            if (pendingStrokePoints.Count >= MaxPendingStrokePoints)
+            {
+                pendingStrokePoints.Dequeue();
+            }
+
             pendingStrokePoints.Enqueue(sampledPoint);
         }
     }
 
     private async void CanvasHost_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (isWindowClosed || isStrokeFinalizing)
+        {
+            return;
+        }
+
+        if (isSpacePanning)
+        {
+            isSpacePanning = false;
+            TryReleasePointerCapture(e, "PointerReleased ending space pan");
+            e.Handled = true;
+            return;
+        }
+
         if (!session.IsConnected || !isDrawing)
         {
             return;
         }
 
-        Point point = NormalizeCanvasPoint(e.GetCurrentPoint(DrawingCanvas).Position);
+        Point point = GetCanvasPointFromHostPointer(e);
         UpdateCanvasPointerText(point);
 
-        if (isShapePreviewActive)
+        isStrokeFinalizing = true;
+        Debug.WriteLine($"[WB-CLIENT][STROKE] PointerReleased entered. drawing={isDrawing}, activeStrokeId={(activeStrokeId ?? "<null>")}, pendingPoints={pendingStrokePoints.Count}");
+        try
         {
+
+            if (isShapePreviewActive)
+            {
+                isDrawing = false;
+                isShapePreviewActive = false;
+                TryReleasePointerCapture(e, "PointerReleased shape preview");
+                RemoveShapePreview();
+
+                IReadOnlyList<Point> shapePoints = BuildShapeStrokePoints(shapeStartPoint, point, selectedDrawingTool);
+                await SendShapeStrokeAsync(shapePoints).ConfigureAwait(false);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(activeStrokeId))
+            {
+                isDrawing = false;
+                isShapePreviewActive = false;
+                pendingStrokePoints.Clear();
+                hasLastQueuedStrokePoint = false;
+                activeStrokeStartSendTask = null;
+                hasSentActiveStrokeStart = false;
+                CancelActiveStrokeSendSession();
+                strokeSendTimer.Stop();
+                return;
+            }
+
+            string strokeId = activeStrokeId;
+            string userName = GetSafeUserName();
+
             isDrawing = false;
-            isShapePreviewActive = false;
-            CanvasHost.ReleasePointerCapture(e.Pointer);
-            RemoveShapePreview();
+            TryReleasePointerCapture(e, "PointerReleased finalize stroke");
+            strokeSendTimer.Stop();
 
-            IReadOnlyList<Point> shapePoints = BuildShapeStrokePoints(shapeStartPoint, point, selectedDrawingTool);
-            await SendShapeStrokeAsync(shapePoints).ConfigureAwait(false);
-            return;
-        }
+            bool strokeStartSent = await EnsureActiveStrokeStartSentAsync();
+            if (!strokeStartSent)
+            {
+                Debug.WriteLine("[WB-CLIENT][STROKE] PointerReleased aborted: stroke start was not sent.");
+                activeStrokeId = null;
+                pendingStrokePoints.Clear();
+                activeStrokeStartSendTask = null;
+                hasSentActiveStrokeStart = false;
+                CancelActiveStrokeSendSession();
+                return;
+            }
 
-        if (string.IsNullOrWhiteSpace(activeStrokeId))
-        {
-            return;
-        }
+            DrawStrokePoint(new StrokePointPayload(
+                strokeId,
+                point.X,
+                point.Y,
+                userName,
+                activeStrokeColorHex,
+                activeStrokeThickness,
+                activeStrokeLayerId));
 
-        string strokeId = activeStrokeId;
-        string userName = GetSafeUserName();
+            CancellationToken strokeSendToken = GetActiveStrokeSendToken();
+            CancellationToken strokeEndSendToken = CancellationToken.None;
+            if (ShouldQueueStrokePoint(point))
+            {
+                if (pendingStrokePoints.Count >= MaxPendingStrokePoints)
+                {
+                    pendingStrokePoints.Dequeue();
+                }
 
-        isDrawing = false;
-        CanvasHost.ReleasePointerCapture(e.Pointer);
-        strokeSendTimer.Stop();
+                pendingStrokePoints.Enqueue(point);
+            }
 
-        bool strokeStartSent = await EnsureActiveStrokeStartSentAsync().ConfigureAwait(false);
-        if (!strokeStartSent)
-        {
+            bool drainCompleted = await DrainPendingStrokePointsBeforeEndAsync(strokeSendToken);
+            if (!drainCompleted)
+            {
+                Debug.WriteLine($"[WB-CLIENT][STROKE] Drain incomplete before end. remainingPoints={pendingStrokePoints.Count}");
+                pendingStrokePoints.Clear();
+            }
+            else
+            {
+                Debug.WriteLine("[WB-CLIENT][STROKE] Drain completed before stroke end send.");
+            }
+
             activeStrokeId = null;
             pendingStrokePoints.Clear();
             activeStrokeStartSendTask = null;
             hasSentActiveStrokeStart = false;
+            hasLastQueuedStrokePoint = false;
+
+            await SafeSendStrokeAsync(() => session.SendStrokeEndAsync(
+                strokeId,
+                point.X,
+                point.Y,
+                userName,
+                activeStrokeColorHex,
+                activeStrokeThickness,
+                activeStrokeLayerId,
+                strokeEndSendToken));
+
+            Debug.WriteLine($"[WB-CLIENT][STROKE] StrokeEnd send attempted. strokeId={strokeId}");
+
+            CancelActiveStrokeSendSession();
+
+            activeStrokes.Remove(strokeId);
+            strokeLayers.Remove(strokeId);
+
+            activeStrokeColorHex = GetEffectiveStrokeColorHex();
+            activeStrokeThickness = GetEffectiveStrokeThickness();
+            activeStrokeLayerId = activeLayerId;
+        }
+        catch (OperationCanceledException) when (isWindowClosed)
+        {
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine($"[WB-CLIENT][STROKE] PointerReleased exception: {exception}");
+            if (!isWindowClosed)
+            {
+                SetConnectionState("Error", $"Stroke finalize failed: {exception.Message}");
+            }
+
+            ResetLocalDrawingState();
+        }
+        finally
+        {
+            isStrokeFinalizing = false;
+            Debug.WriteLine($"[WB-CLIENT][STROKE] PointerReleased exit. drawing={isDrawing}, finalizing={isStrokeFinalizing}, pendingPoints={pendingStrokePoints.Count}, activeStrokeId={(activeStrokeId ?? "<null>")}");
+        }
+    }
+
+    private void CanvasHost_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        if (!isDrawing && !isShapePreviewActive && !isSpacePanning)
+        {
             return;
         }
 
-        DrawStrokePoint(new StrokePointPayload(
-            strokeId,
-            point.X,
-            point.Y,
-            userName,
-            activeStrokeColorHex,
-            activeStrokeThickness,
-            activeStrokeLayerId));
-        pendingStrokePoints.Enqueue(point);
-        await SendPendingStrokePointAsync(forceSend: true).ConfigureAwait(false);
-
-        activeStrokeId = null;
-        pendingStrokePoints.Clear();
-        activeStrokeStartSendTask = null;
-        hasSentActiveStrokeStart = false;
-
-        await SafeSendStrokeAsync(() => session.SendStrokeEndAsync(
-            strokeId,
-            point.X,
-            point.Y,
-            GetSafeUserName(),
-            activeStrokeColorHex,
-            activeStrokeThickness,
-            activeStrokeLayerId,
-            CancellationToken.None)).ConfigureAwait(false);
-
-        activeStrokes.Remove(strokeId);
-        strokeLayers.Remove(strokeId);
-
-        activeStrokeColorHex = GetEffectiveStrokeColorHex();
-        activeStrokeThickness = GetEffectiveStrokeThickness();
-        activeStrokeLayerId = activeLayerId;
+        isSpacePanning = false;
+        ResetLocalDrawingState();
     }
 
     private void CanvasHost_PointerCanceled(object sender, PointerRoutedEventArgs e)
     {
-        CanvasHost.ReleasePointerCapture(e.Pointer);
-        isDrawing = false;
-        isShapePreviewActive = false;
-        RemoveShapePreview();
-        activeStrokeId = null;
-        activeStrokeColorHex = GetEffectiveStrokeColorHex();
-        activeStrokeThickness = GetEffectiveStrokeThickness();
-        activeStrokeLayerId = activeLayerId;
-        pendingStrokePoints.Clear();
-        activeStrokeStartSendTask = null;
-        hasSentActiveStrokeStart = false;
-        strokeSendTimer.Stop();
+        isSpacePanning = false;
+        TryReleasePointerCapture(e, "PointerCanceled");
+        ResetLocalDrawingState();
+    }
+
+    private void TryReleasePointerCapture(PointerRoutedEventArgs e, string context)
+    {
+        if (isWindowClosed)
+        {
+            return;
+        }
+
+        try
+        {
+            CanvasHost.ReleasePointerCapture(e.Pointer);
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine($"[WB-CLIENT][POINTER] ReleasePointerCapture failed ({context}): {exception.Message}");
+        }
     }
 
     private Point NormalizeCanvasPoint(Point point)
@@ -269,12 +436,26 @@ public sealed partial class MainWindow
             Math.Clamp(point.Y, 0, maxY));
     }
 
+    private Point GetCanvasPointFromHostPointer(PointerRoutedEventArgs e)
+    {
+        Point hostPoint = e.GetCurrentPoint(CanvasHost).Position;
+        return NormalizeCanvasPoint(ConvertHostPointToCanvasPoint(hostPoint));
+    }
+
+    private Point ConvertHostPointToCanvasPoint(Point hostPoint)
+    {
+        double zoom = canvasZoom <= 0 ? DefaultCanvasZoom : canvasZoom;
+        double canvasX = (hostPoint.X - canvasPanX) / zoom;
+        double canvasY = (hostPoint.Y - canvasPanY) / zoom;
+        return new Point(canvasX, canvasY);
+    }
+
     private IReadOnlyList<Point> GetPointerSamplePoints(PointerRoutedEventArgs e)
     {
-        var intermediatePoints = e.GetIntermediatePoints(DrawingCanvas);
+        var intermediatePoints = e.GetIntermediatePoints(CanvasHost);
         if (intermediatePoints.Count == 0)
         {
-            return new[] { NormalizeCanvasPoint(e.GetCurrentPoint(DrawingCanvas).Position) };
+            return new[] { GetCanvasPointFromHostPointer(e) };
         }
 
         bool isDescendingByTimestamp = intermediatePoints.Count > 1 &&
@@ -286,14 +467,14 @@ public sealed partial class MainWindow
         {
             for (int index = intermediatePoints.Count - 1; index >= 0; index--)
             {
-                points.Add(NormalizeCanvasPoint(intermediatePoints[index].Position));
+                points.Add(NormalizeCanvasPoint(ConvertHostPointToCanvasPoint(intermediatePoints[index].Position)));
             }
         }
         else
         {
             for (int index = 0; index < intermediatePoints.Count; index++)
             {
-                points.Add(NormalizeCanvasPoint(intermediatePoints[index].Position));
+                points.Add(NormalizeCanvasPoint(ConvertHostPointToCanvasPoint(intermediatePoints[index].Position)));
             }
         }
 
@@ -302,42 +483,74 @@ public sealed partial class MainWindow
 
     private async void StrokeSendTimer_Tick(object? sender, object e)
     {
-        await SendPendingStrokePointAsync(forceSend: false).ConfigureAwait(false);
+        try
+        {
+            await SendPendingStrokePointAsync();
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception exception)
+        {
+            SetConnectionState("Error", $"Stroke loop failed: {exception.Message}");
+        }
     }
 
-    private async Task SendPendingStrokePointAsync(bool forceSend)
+    private async Task SendPendingStrokePointAsync()
     {
+        if (!await strokeSendLoopGate.WaitAsync(0))
+        {
+            return;
+        }
+
         if (!session.IsConnected ||
             string.IsNullOrWhiteSpace(activeStrokeId) ||
-            pendingStrokePoints.Count == 0 ||
-            isStrokeSendInFlight)
+            pendingStrokePoints.Count == 0)
         {
+            strokeSendLoopGate.Release();
+            return;
+        }
+
+        CancellationToken strokeSendToken = GetActiveStrokeSendToken();
+        if (strokeSendToken.IsCancellationRequested)
+        {
+            strokeSendLoopGate.Release();
             return;
         }
 
         if (!hasSentActiveStrokeStart)
         {
-            bool strokeStartSent = await EnsureActiveStrokeStartSentAsync().ConfigureAwait(false);
-            if (!strokeStartSent)
+            try
             {
-                pendingStrokePoints.Clear();
+                bool strokeStartSent = await EnsureActiveStrokeStartSentAsync();
+                if (!strokeStartSent)
+                {
+                    pendingStrokePoints.Clear();
+                    strokeSendLoopGate.Release();
+                    return;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                strokeSendLoopGate.Release();
                 return;
             }
         }
 
         string strokeId = activeStrokeId;
         string userName = GetSafeUserName();
-        int sendLimit = forceSend ? int.MaxValue : MaxStrokePointsPerFlush;
+        int sendLimit = MaxStrokePointsPerFlush;
         int sentCount = 0;
-        isStrokeSendInFlight = true;
 
         try
         {
-            while (pendingStrokePoints.Count > 0 && sentCount < sendLimit)
+            while (session.IsConnected &&
+                   !strokeSendToken.IsCancellationRequested &&
+                   pendingStrokePoints.Count > 0 &&
+                   sentCount < sendLimit)
             {
                 Point point = pendingStrokePoints.Dequeue();
-                if (!forceSend &&
-                    hasLastSentStrokePoint &&
+                if (hasLastSentStrokePoint &&
                     CalculateDistance(lastSentStrokePoint, point) < MinStrokePointDistance)
                 {
                     continue;
@@ -351,21 +564,95 @@ public sealed partial class MainWindow
                     activeStrokeColorHex,
                     activeStrokeThickness,
                     activeStrokeLayerId,
-                    CancellationToken.None).ConfigureAwait(false);
+                    strokeSendToken).ConfigureAwait(false);
 
                 lastSentStrokePoint = point;
                 hasLastSentStrokePoint = true;
                 sentCount++;
             }
         }
+        catch (OperationCanceledException)
+        {
+        }
         catch (Exception exception)
         {
             SetConnectionState("Error", $"Stroke send failed: {exception.Message}");
+            CancelActiveStrokeSendSession();
         }
         finally
         {
-            isStrokeSendInFlight = false;
+            strokeSendLoopGate.Release();
         }
+    }
+
+    private bool ShouldQueueStrokePoint(Point point)
+    {
+        if (!hasLastQueuedStrokePoint)
+        {
+            lastQueuedStrokePoint = point;
+            hasLastQueuedStrokePoint = true;
+            return true;
+        }
+
+        double requiredDistance = MinStrokePointDistance;
+        if (pendingStrokePoints.Count > MaxPendingStrokePoints / 2)
+        {
+            requiredDistance *= 1.75;
+        }
+
+        if (pendingStrokePoints.Count > (MaxPendingStrokePoints * 3) / 4)
+        {
+            requiredDistance *= 1.5;
+        }
+
+        if (CalculateDistance(lastQueuedStrokePoint, point) < requiredDistance)
+        {
+            return false;
+        }
+
+        lastQueuedStrokePoint = point;
+        return true;
+    }
+
+    private async Task<bool> DrainPendingStrokePointsBeforeEndAsync(CancellationToken strokeSendToken)
+    {
+        int iterations = 0;
+        DateTimeOffset deadline = DateTimeOffset.UtcNow + MaxReleaseDrainDuration;
+
+        while (session.IsConnected &&
+               !strokeSendToken.IsCancellationRequested &&
+               pendingStrokePoints.Count > 0)
+        {
+            if (iterations >= MaxReleaseDrainIterations || DateTimeOffset.UtcNow >= deadline)
+            {
+                return false;
+            }
+
+            int queuedBeforeFlush = pendingStrokePoints.Count;
+            await SendPendingStrokePointAsync();
+            if (pendingStrokePoints.Count == 0)
+            {
+                return true;
+            }
+
+            if (pendingStrokePoints.Count >= queuedBeforeFlush)
+            {
+                return false;
+            }
+
+            iterations++;
+
+            try
+            {
+                await Task.Delay(StrokePointInterval, strokeSendToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+        }
+
+        return pendingStrokePoints.Count == 0;
     }
 
     private async Task<bool> EnsureActiveStrokeStartSentAsync()
@@ -381,7 +668,7 @@ public sealed partial class MainWindow
             return false;
         }
 
-        bool sent = await strokeStartTask.ConfigureAwait(false);
+        bool sent = await strokeStartTask;
         hasSentActiveStrokeStart = sent;
         return sent;
     }
@@ -397,8 +684,12 @@ public sealed partial class MainWindow
     {
         try
         {
-            await sendAction().ConfigureAwait(false);
+            await sendAction();
             return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
         }
         catch (Exception exception)
         {

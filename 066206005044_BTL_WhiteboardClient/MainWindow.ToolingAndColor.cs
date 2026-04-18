@@ -44,7 +44,7 @@ public sealed partial class MainWindow
         string colorLabel = GetEffectiveStrokeColorHex();
         double thickness = GetEffectiveStrokeThickness();
         LayerState activeLayer = GetActiveLayerState();
-        CurrentToolTextBlock.Text = $"Tool: {GetToolDisplayName(selectedDrawingTool)} | {colorLabel} | {thickness:0.#} px | {activeLayer.Name}";
+        CurrentToolTextBlock.Text = $"Tool: {GetToolDisplayName(selectedDrawingTool)} | {colorLabel} | {thickness:0.#} px | {GetCanvasZoomText()} | {activeLayer.Name}";
     }
 
     private static string GetToolDisplayName(DrawingTool tool)
@@ -405,6 +405,7 @@ public sealed partial class MainWindow
         string colorHex = GetEffectiveStrokeColorHex();
         double thickness = GetEffectiveStrokeThickness();
         string layerId = activeLayer.LayerId;
+        CancellationToken strokeSendToken = BeginActiveStrokeSendSession();
 
         try
         {
@@ -417,7 +418,7 @@ public sealed partial class MainWindow
                 colorHex,
                 thickness,
                 layerId,
-                CancellationToken.None).ConfigureAwait(false);
+                strokeSendToken).ConfigureAwait(false);
 
             for (int index = 1; index < points.Count - 1; index++)
             {
@@ -430,7 +431,7 @@ public sealed partial class MainWindow
                     colorHex,
                     thickness,
                     layerId,
-                    CancellationToken.None).ConfigureAwait(false);
+                        strokeSendToken).ConfigureAwait(false);
             }
 
             Point last = points[^1];
@@ -442,11 +443,18 @@ public sealed partial class MainWindow
                 colorHex,
                 thickness,
                 layerId,
-                CancellationToken.None).ConfigureAwait(false);
+                strokeSendToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
         }
         catch (Exception exception)
         {
             SetConnectionState("Error", $"Shape send failed: {exception.Message}");
+        }
+        finally
+        {
+            CancelActiveStrokeSendSession();
         }
     }
 

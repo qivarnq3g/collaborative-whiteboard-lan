@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -17,6 +18,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using Windows.Foundation;
+using Windows.UI.Core;
 using Windows.System;
 using Windows.UI.Text;
 
@@ -26,7 +28,7 @@ public sealed partial class MainWindow : Window
 {
     private const double MinStrokePointDistance = 1.2;
     private const double MinRenderedStrokePointDistance = 0.2;
-    private const int MaxStrokePointsPerFlush = 4;
+    private const int MaxStrokePointsPerFlush = 8;
     private const int MaxTrackedLocalStrokes = 20_000;
     private const string DefaultStrokeColorHex = "#1F6FEB";
     private const double DefaultStrokeThickness = 2.4;
@@ -36,6 +38,13 @@ public sealed partial class MainWindow : Window
     private const int MaxChatMessages = 800;
     private const double ChatAutoScrollThreshold = 28;
     private const double MinLayerOpacity = 0.05;
+    private const double MinCanvasZoom = 0.25;
+    private const double MaxCanvasZoom = 4.0;
+    private const double DefaultCanvasZoom = 1.0;
+    private const double CanvasZoomStepMultiplier = 1.1;
+    private const int MaxPendingStrokePoints = 2048;
+    private const int MaxReleaseDrainIterations = 120;
+    private static readonly TimeSpan MaxReleaseDrainDuration = TimeSpan.FromMilliseconds(600);
     private static readonly TimeSpan DiscoveryBackgroundInterval = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan StrokePointInterval = TimeSpan.FromMilliseconds(16);
 
@@ -252,14 +261,16 @@ public sealed partial class MainWindow : Window
     private readonly Dictionary<string, LayerState> layersById = new(StringComparer.Ordinal);
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer discoveryTimer;
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer strokeSendTimer;
+    private readonly SemaphoreSlim strokeSendLoopGate = new(1, 1);
 
     private int refreshRoomsInProgress;
     private bool isDrawing;
     private string? activeStrokeId;
     private readonly Queue<Point> pendingStrokePoints = new();
+    private bool hasLastQueuedStrokePoint;
+    private Point lastQueuedStrokePoint;
     private bool hasLastSentStrokePoint;
     private Point lastSentStrokePoint;
-    private bool isStrokeSendInFlight;
     private Task<bool>? activeStrokeStartSendTask;
     private bool hasSentActiveStrokeStart;
     private bool isUpdatingThemeSelection;
@@ -270,8 +281,16 @@ public sealed partial class MainWindow : Window
     private bool isUpdatingLayerOpacity;
     private bool isRootVisualReady;
     private bool isShapePreviewActive;
+    private bool isStrokeFinalizing;
     private bool isWindowClosed;
+    private bool isAltKeyPressed;
+    private bool isSpaceKeyPressed;
+    private bool isSpacePanning;
+    private Point spacePanStartHostPoint;
+    private double spacePanStartX;
+    private double spacePanStartY;
     private readonly CancellationTokenSource refreshRoomsCancellationSource = new();
+    private CancellationTokenSource? activeStrokeSendCancellationSource;
     private string selectedStrokeColorHex = DefaultStrokeColorHex;
     private double selectedStrokeThickness = DefaultStrokeThickness;
     private string activeStrokeColorHex = DefaultStrokeColorHex;
@@ -285,7 +304,13 @@ public sealed partial class MainWindow : Window
     private string lastRoomsSignature = string.Empty;
     private string connectionState = "Disconnected";
     private string connectedEndpoint = string.Empty;
+    private string lastKnownUserName = $"User-{Environment.MachineName}";
     private ScrollViewer? chatListScrollViewer;
+    private readonly CompositeTransform drawingCanvasViewportTransform = new();
+    private readonly RectangleGeometry canvasViewportClipGeometry = new();
+    private double canvasZoom = DefaultCanvasZoom;
+    private double canvasPanX;
+    private double canvasPanY;
 
     public MainWindow()
     {
@@ -302,10 +327,14 @@ public sealed partial class MainWindow : Window
         ChatListView.ItemsSource = chatMessages;
         ActiveLayerComboBox.ItemsSource = layers;
         LayersListView.ItemsSource = layers;
+        CanvasViewportGrid.Clip = canvasViewportClipGeometry;
+        DrawingCanvas.RenderTransform = drawingCanvasViewportTransform;
+        ApplyCanvasViewportTransform();
 
         InitializeLayers();
 
         UserNameTextBox.Text = Environment.UserName;
+        lastKnownUserName = UserNameTextBox.Text.Trim();
         InitializeThemeSelection();
         InitializeStrokeToolSelection();
         SelectDrawingTool(DrawingTool.Pencil);
@@ -339,9 +368,17 @@ public sealed partial class MainWindow : Window
         }
 
         isRootVisualReady = true;
+        UpdateCanvasViewportClip();
+        ApplyCanvasViewportTransform();
         UpdateLayerControls();
         RefreshThemeBoundVisuals();
         EnsureChatScrollViewer();
+    }
+
+    private void CanvasViewportGrid_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        UpdateCanvasViewportClip();
+        ApplyCanvasViewportTransform();
     }
 
     private async void DiscoveryTimer_Tick(object? sender, object e)
@@ -394,6 +431,16 @@ public sealed partial class MainWindow : Window
 
     private async void MainWindow_KeyDown(object sender, KeyRoutedEventArgs e)
     {
+        UpdateAltKeyState(e.Key, isPressed: true);
+        UpdateSpaceKeyState(e.Key, isPressed: true);
+
+        if (IsControlKeyDown() && (e.Key == VirtualKey.Number0 || e.Key == VirtualKey.NumberPad0))
+        {
+            ResetCanvasViewport();
+            e.Handled = true;
+            return;
+        }
+
         if (IsTextInputFocused())
         {
             if (TryHandlePanelTabShortcut(e.Key))
@@ -456,6 +503,172 @@ public sealed partial class MainWindow : Window
                 LayerDeleteButton_Click(this, new RoutedEventArgs());
                 e.Handled = true;
                 break;
+        }
+    }
+
+    private void MainWindow_KeyUp(object sender, KeyRoutedEventArgs e)
+    {
+        UpdateAltKeyState(e.Key, isPressed: false);
+        UpdateSpaceKeyState(e.Key, isPressed: false);
+    }
+
+    private void ApplyCanvasViewportTransform()
+    {
+        ClampCanvasPanToViewport();
+        drawingCanvasViewportTransform.ScaleX = canvasZoom;
+        drawingCanvasViewportTransform.ScaleY = canvasZoom;
+        drawingCanvasViewportTransform.TranslateX = canvasPanX;
+        drawingCanvasViewportTransform.TranslateY = canvasPanY;
+    }
+
+    private void UpdateCanvasViewportClip()
+    {
+        double viewportWidth = Math.Max(0, CanvasViewportGrid.ActualWidth);
+        double viewportHeight = Math.Max(0, CanvasViewportGrid.ActualHeight);
+        canvasViewportClipGeometry.Rect = new Rect(0, 0, viewportWidth, viewportHeight);
+    }
+
+    private void ClampCanvasPanToViewport()
+    {
+        double viewportWidth = Math.Max(0, CanvasViewportGrid.ActualWidth);
+        double viewportHeight = Math.Max(0, CanvasViewportGrid.ActualHeight);
+        if (viewportWidth <= 0 || viewportHeight <= 0)
+        {
+            return;
+        }
+
+        double contentWidth = Math.Max(1, DrawingCanvas.ActualWidth);
+        double contentHeight = Math.Max(1, DrawingCanvas.ActualHeight);
+        double scaledWidth = contentWidth * canvasZoom;
+        double scaledHeight = contentHeight * canvasZoom;
+
+        if (scaledWidth <= viewportWidth)
+        {
+            canvasPanX = (viewportWidth - scaledWidth) / 2.0;
+        }
+        else
+        {
+            double minPanX = viewportWidth - scaledWidth;
+            canvasPanX = Math.Clamp(canvasPanX, minPanX, 0);
+        }
+
+        if (scaledHeight <= viewportHeight)
+        {
+            canvasPanY = (viewportHeight - scaledHeight) / 2.0;
+        }
+        else
+        {
+            double minPanY = viewportHeight - scaledHeight;
+            canvasPanY = Math.Clamp(canvasPanY, minPanY, 0);
+        }
+    }
+
+    private void ResetCanvasViewport()
+    {
+        canvasZoom = DefaultCanvasZoom;
+        canvasPanX = 0;
+        canvasPanY = 0;
+        ApplyCanvasViewportTransform();
+        UpdateToolStatusText();
+    }
+
+    private void UpdateAltKeyState(VirtualKey key, bool isPressed)
+    {
+        if (key is VirtualKey.Menu or VirtualKey.LeftMenu or VirtualKey.RightMenu)
+        {
+            isAltKeyPressed = isPressed;
+        }
+    }
+
+    private void UpdateSpaceKeyState(VirtualKey key, bool isPressed)
+    {
+        if (key == VirtualKey.Space)
+        {
+            isSpaceKeyPressed = isPressed;
+        }
+    }
+
+    private bool IsAltPressedForZoom()
+    {
+        if (isAltKeyPressed)
+        {
+            return true;
+        }
+
+        CoreVirtualKeyStates genericAlt = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Menu);
+        if ((genericAlt & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down)
+        {
+            return true;
+        }
+
+        CoreVirtualKeyStates leftAlt = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.LeftMenu);
+        if ((leftAlt & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down)
+        {
+            return true;
+        }
+
+        CoreVirtualKeyStates rightAlt = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.RightMenu);
+        return (rightAlt & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down;
+    }
+
+    private bool IsSpacePressedForPan()
+    {
+        if (isSpaceKeyPressed)
+        {
+            return true;
+        }
+
+        CoreVirtualKeyStates spaceKey = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Space);
+        return (spaceKey & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down;
+    }
+
+    private static bool IsControlKeyDown()
+    {
+        CoreVirtualKeyStates keyStates = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control);
+        return (keyStates & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down;
+    }
+
+    private static double ClampCanvasZoom(double zoom)
+    {
+        return Math.Clamp(zoom, MinCanvasZoom, MaxCanvasZoom);
+    }
+
+    private string GetCanvasZoomText()
+    {
+        return $"Zoom {Math.Round(canvasZoom * 100.0, 0).ToString(CultureInfo.InvariantCulture)}%";
+    }
+
+    private CancellationToken BeginActiveStrokeSendSession()
+    {
+        CancelActiveStrokeSendSession();
+        activeStrokeSendCancellationSource = new CancellationTokenSource();
+        return activeStrokeSendCancellationSource.Token;
+    }
+
+    private CancellationToken GetActiveStrokeSendToken()
+    {
+        return activeStrokeSendCancellationSource?.Token ?? CancellationToken.None;
+    }
+
+    private void CancelActiveStrokeSendSession()
+    {
+        CancellationTokenSource? source = activeStrokeSendCancellationSource;
+        if (source is null)
+        {
+            return;
+        }
+
+        activeStrokeSendCancellationSource = null;
+        try
+        {
+            source.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        finally
+        {
+            source.Dispose();
         }
     }
 
@@ -583,47 +796,59 @@ public sealed partial class MainWindow : Window
 
     private async Task SendUndoAsync()
     {
+        Debug.WriteLine($"[WB-CLIENT][UNDO] Request started. connected={session.IsConnected}, drawing={isDrawing}, shapePreview={isShapePreviewActive}, finalizing={isStrokeFinalizing}, pendingPoints={pendingStrokePoints.Count}, activeStrokeId={(activeStrokeId ?? "<null>")}");
+
         if (!session.IsConnected)
         {
             SetConnectionState("Disconnected", "Connect to a room before undo.");
+            Debug.WriteLine("[WB-CLIENT][UNDO] Blocked: session not connected.");
             return;
         }
 
         if (!CanApplyHistoryAction("Undo"))
         {
+            Debug.WriteLine("[WB-CLIENT][UNDO] Blocked by CanApplyHistoryAction.");
             return;
         }
 
         try
         {
             await session.SendUndoAsync(GetSafeUserName(), CancellationToken.None).ConfigureAwait(false);
+            Debug.WriteLine("[WB-CLIENT][UNDO] Request sent to server.");
         }
         catch (Exception exception)
         {
             SetConnectionState("Error", $"Undo failed: {exception.Message}");
+            Debug.WriteLine($"[WB-CLIENT][UNDO] Send failed: {exception.Message}");
         }
     }
 
     private async Task SendRedoAsync()
     {
+        Debug.WriteLine($"[WB-CLIENT][REDO] Request started. connected={session.IsConnected}, drawing={isDrawing}, shapePreview={isShapePreviewActive}, finalizing={isStrokeFinalizing}, pendingPoints={pendingStrokePoints.Count}, activeStrokeId={(activeStrokeId ?? "<null>")}");
+
         if (!session.IsConnected)
         {
             SetConnectionState("Disconnected", "Connect to a room before redo.");
+            Debug.WriteLine("[WB-CLIENT][REDO] Blocked: session not connected.");
             return;
         }
 
         if (!CanApplyHistoryAction("Redo"))
         {
+            Debug.WriteLine("[WB-CLIENT][REDO] Blocked by CanApplyHistoryAction.");
             return;
         }
 
         try
         {
             await session.SendRedoAsync(GetSafeUserName(), CancellationToken.None).ConfigureAwait(false);
+            Debug.WriteLine("[WB-CLIENT][REDO] Request sent to server.");
         }
         catch (Exception exception)
         {
             SetConnectionState("Error", $"Redo failed: {exception.Message}");
+            Debug.WriteLine($"[WB-CLIENT][REDO] Send failed: {exception.Message}");
         }
     }
 
@@ -642,6 +867,7 @@ public sealed partial class MainWindow : Window
         discoveryTimer.Stop();
         strokeSendTimer.Stop();
         ResetLocalDrawingState();
+        strokeSendLoopGate.Dispose();
         await session.DisposeAsync();
         refreshRoomsCancellationSource.Dispose();
     }
@@ -650,25 +876,48 @@ public sealed partial class MainWindow : Window
     {
         isDrawing = false;
         isShapePreviewActive = false;
+        isStrokeFinalizing = false;
         RemoveShapePreview();
         activeStrokeId = null;
         activeStrokeLayerId = activeLayerId;
         pendingStrokePoints.Clear();
+        hasLastQueuedStrokePoint = false;
         hasLastSentStrokePoint = false;
+        isSpacePanning = false;
         activeStrokeStartSendTask = null;
         hasSentActiveStrokeStart = false;
-        isStrokeSendInFlight = false;
+        CancelActiveStrokeSendSession();
         strokeSendTimer.Stop();
     }
 
     private bool CanApplyHistoryAction(string actionName)
     {
-        bool strokeStartPending = activeStrokeStartSendTask is { IsCompleted: false };
-        if (isDrawing || isShapePreviewActive || strokeStartPending || pendingStrokePoints.Count > 0)
+        bool hasStaleDrawingState = !isDrawing &&
+            !isShapePreviewActive &&
+            (activeStrokeId is not null || pendingStrokePoints.Count > 0 || hasSentActiveStrokeStart);
+        if (hasStaleDrawingState)
         {
-            SetStatus($"{actionName} is unavailable while drawing. Release pointer and try again.");
+            ResetLocalDrawingState();
+        }
+
+        bool strokeStartPending = activeStrokeStartSendTask is { IsCompleted: false };
+        if (isDrawing || isShapePreviewActive || isStrokeFinalizing || strokeStartPending || pendingStrokePoints.Count > 0)
+        {
+            Debug.WriteLine($"[WB-CLIENT][{actionName.ToUpperInvariant()}] Blocked. drawing={isDrawing}, shapePreview={isShapePreviewActive}, finalizing={isStrokeFinalizing}, strokeStartPending={strokeStartPending}, pendingPoints={pendingStrokePoints.Count}, activeStrokeId={(activeStrokeId ?? "<null>")}");
+
+            if (isStrokeFinalizing)
+            {
+                SetStatus($"{actionName} is unavailable while finishing the previous stroke. Try again in a moment.");
+            }
+            else
+            {
+                SetStatus($"{actionName} is unavailable while drawing. Release pointer and try again.");
+            }
+
             return false;
         }
+
+        Debug.WriteLine($"[WB-CLIENT][{actionName.ToUpperInvariant()}] Allowed.");
 
         return true;
     }
@@ -897,6 +1146,16 @@ public sealed partial class MainWindow : Window
 
     private string GetSafeUserName()
     {
+        if (!DispatcherQueue.HasThreadAccess)
+        {
+            if (!string.IsNullOrWhiteSpace(lastKnownUserName))
+            {
+                return lastKnownUserName;
+            }
+
+            return $"User-{Environment.MachineName}";
+        }
+
         string userName = UserNameTextBox.Text.Trim();
         if (userName.Length == 0)
         {
@@ -904,6 +1163,7 @@ public sealed partial class MainWindow : Window
             UserNameTextBox.Text = userName;
         }
 
+        lastKnownUserName = userName;
         return userName;
     }
 

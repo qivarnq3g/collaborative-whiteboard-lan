@@ -8,11 +8,12 @@ internal sealed class ConnectedClient : IAsyncDisposable
 	private static readonly TimeSpan ChatWindow = TimeSpan.FromSeconds(2);
 	private static readonly TimeSpan StrokeWindow = TimeSpan.FromSeconds(1);
 	private const int MaxChatMessagesPerWindow = 6;
-	private const int MaxStrokeMessagesPerWindow = 600;
+	private const int MaxStrokeMessagesPerWindow = 1200;
 
 	private readonly Queue<DateTimeOffset> chatSamples = new();
 	private readonly Queue<DateTimeOffset> strokeSamples = new();
 	private readonly object rateGate = new();
+	private int consecutiveStrokeThrottles;
 
 	public ConnectedClient(string userId, string userName, TcpClient tcpClient, NetworkStream stream)
 	{
@@ -42,9 +43,24 @@ internal sealed class ConnectedClient : IAsyncDisposable
 
 	public bool TryConsumeStrokeSlot(DateTimeOffset now)
 	{
+		return TryConsumeStrokeSlot(now, out _);
+	}
+
+	public bool TryConsumeStrokeSlot(DateTimeOffset now, out bool shouldReportThrottle)
+	{
 		lock (rateGate)
 		{
-			return TryConsume(strokeSamples, now, StrokeWindow, MaxStrokeMessagesPerWindow);
+			bool consumed = TryConsume(strokeSamples, now, StrokeWindow, MaxStrokeMessagesPerWindow);
+			if (consumed)
+			{
+				consecutiveStrokeThrottles = 0;
+				shouldReportThrottle = false;
+				return true;
+			}
+
+			consecutiveStrokeThrottles++;
+			shouldReportThrottle = consecutiveStrokeThrottles == 1 || (consecutiveStrokeThrottles % 300) == 0;
+			return false;
 		}
 	}
 
