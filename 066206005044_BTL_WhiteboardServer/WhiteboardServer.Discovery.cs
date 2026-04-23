@@ -72,9 +72,6 @@ internal sealed partial class WhiteboardServer
 		}
 	}
 
-	// Called under ownershipLock-guarded logic; returns true if the client may proceed.
-	// The first caller atomically decides the room's password mode (protected or open).
-	// Subsequent callers are bound to whatever the first caller decided.
 	private bool ValidateOrInitializePassword(string userId, string? password, out string failureMessage)
 	{
 		lock (ownershipLock)
@@ -114,7 +111,6 @@ internal sealed partial class WhiteboardServer
 
 			if (!roomPasswordModeLocked)
 			{
-				// First client decides the password mode.
 				if (!string.IsNullOrWhiteSpace(password))
 				{
 					roomPasswordHash = ComputePasswordHash(password);
@@ -126,7 +122,6 @@ internal sealed partial class WhiteboardServer
 				return true;
 			}
 
-			// Password mode is already decided — enforce it.
 			if (roomPasswordHash is null)
 			{
 				if (!string.IsNullOrWhiteSpace(password))
@@ -135,7 +130,7 @@ internal sealed partial class WhiteboardServer
 					return false;
 				}
 
-				return true; // Open room.
+				return true;
 			}
 
 			if (string.IsNullOrWhiteSpace(password))
@@ -211,10 +206,10 @@ internal sealed partial class WhiteboardServer
 					return new ReserveRoomPasswordResultPayload(false, "Another client already saved a password for this room.", reservedPasswordExpiresAtUtc?.ToUnixTimeMilliseconds());
 				}
 
-				reservedPasswordHash = passwordHash;
-				reservedPasswordExpiresAtUtc = expiresAtUtc;
-				Console.WriteLine($"[AUTH] Room password reservation refreshed by client {normalizedClientId[..6]}.");
-				return new ReserveRoomPasswordResultPayload(true, "Room password reserved successfully.", expiresAtUtc.ToUnixTimeMilliseconds());
+					reservedPasswordHash = passwordHash;
+					reservedPasswordExpiresAtUtc = expiresAtUtc;
+					Console.WriteLine($"[AUTH] Room password reservation refreshed by client {normalizedClientId[..6]}.");
+					return new ReserveRoomPasswordResultPayload(true, "Room password reserved successfully.", expiresAtUtc.ToUnixTimeMilliseconds());
 			}
 
 			reservedPasswordOwnerId = normalizedClientId;

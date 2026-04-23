@@ -473,7 +473,7 @@ public sealed partial class MainWindow
             preparedRoomKey = null;
             SetStatus("Password cleared. Room will stay open when you connect first.");
             UpdatePasswordInputGuidance();
-            SaveRoomPasswordButton.Content = "\u2713 Cleared";
+            SaveRoomPasswordButton.Content = "Cleared";
             await Task.Delay(1500);
             SaveRoomPasswordButton.Content = "Save Password";
             return;
@@ -533,7 +533,7 @@ public sealed partial class MainWindow
             isRoomPasswordPrepared = true;
             SetStatus("Password saved \u2013 connect to activate it");
             UpdatePasswordInputGuidance();
-            SaveRoomPasswordButton.Content = "\u2713 Saved";
+            SaveRoomPasswordButton.Content = "Saved";
             await Task.Delay(1500);
             SaveRoomPasswordButton.Content = "Save Password";
         }

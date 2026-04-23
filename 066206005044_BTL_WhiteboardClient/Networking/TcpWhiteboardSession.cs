@@ -57,10 +57,6 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
             throw new InvalidOperationException("Host is required.");
         }
 
-        // Cancel before acquiring the gate. ReconnectLoopAsync holds the gate while
-        // waiting on Task.Delay; cancelling here lets it exit the delay and release
-        // the gate, breaking the deadlock where ConnectAsync and the reconnect loop
-        // each wait for the other.
         lifecycleSource?.Cancel();
 
         await reconnectGate.WaitAsync(cancellationToken).ConfigureAwait(false);

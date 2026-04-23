@@ -504,7 +504,6 @@ public sealed partial class MainWindow
 
     private void UpdateCanvasPointerText(Point point)
     {
-        // Pointer coordinates display removed for cleaner UI
     }
 
     private string GetSelectedStrokeColorHex()

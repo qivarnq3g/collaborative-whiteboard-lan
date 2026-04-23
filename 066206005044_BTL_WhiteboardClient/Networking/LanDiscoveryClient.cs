@@ -230,8 +230,6 @@ public sealed class LanDiscoveryClient
     }
 
     private sealed record CachedRoom(DiscoveredRoom Room, DateTimeOffset LastSeenUtc);
-    // Sends a unicast UDP query to a specific server and returns fresh room state.
-    // Bypasses the cache so the caller always gets a server-current IsFirstUserMode value.
     public async Task<DiscoveredRoom?> PingServerAsync(string address, int discoveryPort, CancellationToken cancellationToken)
     {
         if (!IPAddress.TryParse(address, out IPAddress? ipAddress))

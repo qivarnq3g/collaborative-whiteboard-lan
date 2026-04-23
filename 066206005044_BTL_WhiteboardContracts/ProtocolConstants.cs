@@ -1,9 +1,5 @@
 namespace Btl.Whiteboard.Contracts;
 
-/// <summary>
-/// Protocol-level limits enforced by both the server and the client.
-/// Centralizing these prevents silent divergence between the two sides.
-/// </summary>
 public static class ProtocolConstants
 {
     public const int MaxUserNameLength = 36;

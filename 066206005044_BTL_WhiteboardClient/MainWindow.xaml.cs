@@ -546,10 +546,6 @@ public sealed partial class MainWindow : Window
         return !string.IsNullOrWhiteSpace(strokeId) && localStrokeIds.Contains(strokeId);
     }
 
-    // Called when AUTH_FAILED arrives during a first-user mode attempt, meaning a concurrent
-    // client committed a password before us. Re-pings the server to get the authoritative
-    // post-race state, refreshes the room list entry, and guides the user to enter the password.
-
     private void InitializeThemeSelection()
     {
         if (Content is not FrameworkElement root)
