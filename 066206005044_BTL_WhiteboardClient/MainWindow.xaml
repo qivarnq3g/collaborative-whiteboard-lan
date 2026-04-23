@@ -508,7 +508,7 @@
                                             <StackPanel Orientation="Horizontal" Spacing="6">
                                                 <FontIcon Glyph="&#xE77B;" FontSize="14" VerticalAlignment="Center" />
                                                 <TextBlock Text="{Binding UserName}" VerticalAlignment="Center" />
-                                                <TextBlock Text="?" Foreground="{ThemeResource WarningBadgeTextBrush}" FontWeight="Bold" VerticalAlignment="Center" Visibility="{Binding IsOwner, Converter={StaticResource BoolToVisibilityConverter}}" ToolTipService.ToolTip="Room Owner" />
+                                                <FontIcon Glyph="&#xE735;" FontSize="12" Foreground="{ThemeResource WarningBadgeTextBrush}" VerticalAlignment="Center" Visibility="{Binding IsOwner, Converter={StaticResource BoolToVisibilityConverter}}" ToolTipService.ToolTip="Room Owner" />
                                             </StackPanel>
                                             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4" x:Name="UserActionsPanel" Visibility="{Binding CanModerate, Converter={StaticResource BoolToVisibilityConverter}}">
                                                 <Button x:Name="KickUserButton" Content="Kick" Click="KickUserButton_Click" Padding="6,2" FontSize="11" ToolTipService.ToolTip="Remove from room" />
