@@ -14,3 +14,4 @@ WindowsAppRuntimeInstall-x64.exe
 .env.local
 .DS_Store
 Thumbs.db
+DEMO_TEST_REPORT_TEMPLATE.md

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
@@ -26,18 +26,33 @@ namespace Btl.Whiteboard.Client;
 
 public sealed partial class MainWindow : Window
 {
+    private sealed class OnlineUserItem
+    {
+        public string UserId { get; init; } = string.Empty;
+        public string UserName { get; init; } = string.Empty;
+        public bool IsOwner { get; init; }
+        public bool CanModerate { get; init; }
+
+        public string DisplayName => IsOwner ? $"{UserName} ★" : UserName;
+        public string OwnerBadge => IsOwner ? "★" : "";
+    }
+    private sealed class BannedUserItem
+    {
+        public string UserId { get; init; } = string.Empty;
+        public string DisplayName { get; init; } = string.Empty;
+    }
     private const double MinStrokePointDistance = 1.2;
     private const double MinRenderedStrokePointDistance = 0.2;
     private const int MaxStrokePointsPerFlush = 8;
     private const int MaxTrackedLocalStrokes = 20_000;
     private const string DefaultStrokeColorHex = "#1F6FEB";
     private const double DefaultStrokeThickness = 2.4;
-    private const double MinStrokeThickness = 1;
-    private const double MaxStrokeThickness = 24;
+    private const double MinStrokeThickness = ProtocolConstants.MinStrokeThickness;
+    private const double MaxStrokeThickness = ProtocolConstants.MaxStrokeThickness;
     private const int MaxRecentColors = 12;
     private const int MaxChatMessages = 800;
     private const double ChatAutoScrollThreshold = 28;
-    private const double MinLayerOpacity = 0.05;
+    private const double MinLayerOpacity = 0.0;
     private const double MinCanvasZoom = 0.25;
     private const double MaxCanvasZoom = 4.0;
     private const double DefaultCanvasZoom = 1.0;
@@ -248,7 +263,9 @@ public sealed partial class MainWindow : Window
     private readonly LanDiscoveryClient discoveryClient = new();
     private readonly TcpWhiteboardSession session = new();
     private readonly ObservableCollection<DiscoveredRoom> rooms = new();
-    private readonly ObservableCollection<string> onlineUsers = new();
+    private readonly ObservableCollection<OnlineUserItem> onlineUsers = new();
+    private readonly ObservableCollection<BannedUserItem> bannedUsers = new();
+    private readonly Dictionary<string, string> knownUserNames = new(StringComparer.Ordinal);
     private readonly ObservableCollection<string> chatMessages = new();
     private readonly HashSet<string> chatMessageKeys = new(StringComparer.Ordinal);
     private readonly Queue<string?> chatMessageKeyOrder = new();
@@ -283,10 +300,16 @@ public sealed partial class MainWindow : Window
     private bool isShapePreviewActive;
     private bool isStrokeFinalizing;
     private bool isWindowClosed;
+    private bool isRoomLocked;
+    private bool isConnectInProgress;
+    private bool isRoomPasswordPrepared;
     private bool isAltKeyPressed;
     private bool isSpaceKeyPressed;
     private bool isSpacePanning;
     private Point spacePanStartHostPoint;
+    private string? roomOwnerId;
+    private string? roomOwnerUserName;
+    private string? selectedTargetUserId;
     private double spacePanStartX;
     private double spacePanStartY;
     private readonly CancellationTokenSource refreshRoomsCancellationSource = new();
@@ -305,6 +328,8 @@ public sealed partial class MainWindow : Window
     private string connectionState = "Disconnected";
     private string connectedEndpoint = string.Empty;
     private string lastKnownUserName = $"User-{Environment.MachineName}";
+    private string? preparedRoomPassword;
+    private string? preparedRoomKey;
     private ScrollViewer? chatListScrollViewer;
     private readonly CompositeTransform drawingCanvasViewportTransform = new();
     private readonly RectangleGeometry canvasViewportClipGeometry = new();
@@ -324,6 +349,7 @@ public sealed partial class MainWindow : Window
 
         RoomListView.ItemsSource = rooms;
         OnlineUsersListView.ItemsSource = onlineUsers;
+        BannedUsersComboBox.ItemsSource = bannedUsers;
         ChatListView.ItemsSource = chatMessages;
         ActiveLayerComboBox.ItemsSource = layers;
         LayersListView.ItemsSource = layers;
@@ -339,6 +365,7 @@ public sealed partial class MainWindow : Window
         InitializeStrokeToolSelection();
         SelectDrawingTool(DrawingTool.Pencil);
         UpdateRoomVisuals();
+        UpdatePasswordInputGuidance();
         UpdateOnlineUserVisuals();
         UpdateChatVisuals();
 
@@ -356,7 +383,7 @@ public sealed partial class MainWindow : Window
 
         Closed += MainWindow_Closed;
 
-        SetConnectionState("Disconnected", "Start server and refresh rooms to join a session.");
+        SetConnectionState("Disconnected", "Select a room to connect");
         _ = RefreshRoomsAsync(DiscoveryRefreshOrigin.Startup);
     }
 
@@ -373,12 +400,6 @@ public sealed partial class MainWindow : Window
         UpdateLayerControls();
         RefreshThemeBoundVisuals();
         EnsureChatScrollViewer();
-    }
-
-    private void CanvasViewportGrid_SizeChanged(object sender, SizeChangedEventArgs e)
-    {
-        UpdateCanvasViewportClip();
-        ApplyCanvasViewportTransform();
     }
 
     private async void DiscoveryTimer_Tick(object? sender, object e)
@@ -429,215 +450,6 @@ public sealed partial class MainWindow : Window
         RefreshThemeBoundVisuals();
     }
 
-    private async void MainWindow_KeyDown(object sender, KeyRoutedEventArgs e)
-    {
-        UpdateAltKeyState(e.Key, isPressed: true);
-        UpdateSpaceKeyState(e.Key, isPressed: true);
-
-        if (IsControlKeyDown() && (e.Key == VirtualKey.Number0 || e.Key == VirtualKey.NumberPad0))
-        {
-            ResetCanvasViewport();
-            e.Handled = true;
-            return;
-        }
-
-        if (IsTextInputFocused())
-        {
-            if (TryHandlePanelTabShortcut(e.Key))
-            {
-                e.Handled = true;
-            }
-
-            return;
-        }
-
-        if (TryHandlePanelTabShortcut(e.Key))
-        {
-            e.Handled = true;
-            return;
-        }
-
-        switch (e.Key)
-        {
-            case VirtualKey.P:
-                SelectDrawingTool(DrawingTool.Pencil);
-                e.Handled = true;
-                break;
-
-            case VirtualKey.L:
-                SelectDrawingTool(DrawingTool.Line);
-                e.Handled = true;
-                break;
-
-            case VirtualKey.R:
-                SelectDrawingTool(DrawingTool.Rectangle);
-                e.Handled = true;
-                break;
-
-            case VirtualKey.O:
-                SelectDrawingTool(DrawingTool.Ellipse);
-                e.Handled = true;
-                break;
-
-            case VirtualKey.E:
-                SelectDrawingTool(DrawingTool.Eraser);
-                e.Handled = true;
-                break;
-
-            case VirtualKey.N:
-                LayerPanelAddButton_Click(this, new RoutedEventArgs());
-                e.Handled = true;
-                break;
-
-            case VirtualKey.U:
-                await SendUndoAsync();
-                e.Handled = true;
-                break;
-
-            case VirtualKey.Y:
-                await SendRedoAsync();
-                e.Handled = true;
-                break;
-
-            case VirtualKey.Delete:
-                LayerDeleteButton_Click(this, new RoutedEventArgs());
-                e.Handled = true;
-                break;
-        }
-    }
-
-    private void MainWindow_KeyUp(object sender, KeyRoutedEventArgs e)
-    {
-        UpdateAltKeyState(e.Key, isPressed: false);
-        UpdateSpaceKeyState(e.Key, isPressed: false);
-    }
-
-    private void ApplyCanvasViewportTransform()
-    {
-        ClampCanvasPanToViewport();
-        drawingCanvasViewportTransform.ScaleX = canvasZoom;
-        drawingCanvasViewportTransform.ScaleY = canvasZoom;
-        drawingCanvasViewportTransform.TranslateX = canvasPanX;
-        drawingCanvasViewportTransform.TranslateY = canvasPanY;
-    }
-
-    private void UpdateCanvasViewportClip()
-    {
-        double viewportWidth = Math.Max(0, CanvasViewportGrid.ActualWidth);
-        double viewportHeight = Math.Max(0, CanvasViewportGrid.ActualHeight);
-        canvasViewportClipGeometry.Rect = new Rect(0, 0, viewportWidth, viewportHeight);
-    }
-
-    private void ClampCanvasPanToViewport()
-    {
-        double viewportWidth = Math.Max(0, CanvasViewportGrid.ActualWidth);
-        double viewportHeight = Math.Max(0, CanvasViewportGrid.ActualHeight);
-        if (viewportWidth <= 0 || viewportHeight <= 0)
-        {
-            return;
-        }
-
-        double contentWidth = Math.Max(1, DrawingCanvas.ActualWidth);
-        double contentHeight = Math.Max(1, DrawingCanvas.ActualHeight);
-        double scaledWidth = contentWidth * canvasZoom;
-        double scaledHeight = contentHeight * canvasZoom;
-
-        if (scaledWidth <= viewportWidth)
-        {
-            canvasPanX = (viewportWidth - scaledWidth) / 2.0;
-        }
-        else
-        {
-            double minPanX = viewportWidth - scaledWidth;
-            canvasPanX = Math.Clamp(canvasPanX, minPanX, 0);
-        }
-
-        if (scaledHeight <= viewportHeight)
-        {
-            canvasPanY = (viewportHeight - scaledHeight) / 2.0;
-        }
-        else
-        {
-            double minPanY = viewportHeight - scaledHeight;
-            canvasPanY = Math.Clamp(canvasPanY, minPanY, 0);
-        }
-    }
-
-    private void ResetCanvasViewport()
-    {
-        canvasZoom = DefaultCanvasZoom;
-        canvasPanX = 0;
-        canvasPanY = 0;
-        ApplyCanvasViewportTransform();
-        UpdateToolStatusText();
-    }
-
-    private void UpdateAltKeyState(VirtualKey key, bool isPressed)
-    {
-        if (key is VirtualKey.Menu or VirtualKey.LeftMenu or VirtualKey.RightMenu)
-        {
-            isAltKeyPressed = isPressed;
-        }
-    }
-
-    private void UpdateSpaceKeyState(VirtualKey key, bool isPressed)
-    {
-        if (key == VirtualKey.Space)
-        {
-            isSpaceKeyPressed = isPressed;
-        }
-    }
-
-    private bool IsAltPressedForZoom()
-    {
-        if (isAltKeyPressed)
-        {
-            return true;
-        }
-
-        CoreVirtualKeyStates genericAlt = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Menu);
-        if ((genericAlt & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down)
-        {
-            return true;
-        }
-
-        CoreVirtualKeyStates leftAlt = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.LeftMenu);
-        if ((leftAlt & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down)
-        {
-            return true;
-        }
-
-        CoreVirtualKeyStates rightAlt = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.RightMenu);
-        return (rightAlt & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down;
-    }
-
-    private bool IsSpacePressedForPan()
-    {
-        if (isSpaceKeyPressed)
-        {
-            return true;
-        }
-
-        CoreVirtualKeyStates spaceKey = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Space);
-        return (spaceKey & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down;
-    }
-
-    private static bool IsControlKeyDown()
-    {
-        CoreVirtualKeyStates keyStates = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control);
-        return (keyStates & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down;
-    }
-
-    private static double ClampCanvasZoom(double zoom)
-    {
-        return Math.Clamp(zoom, MinCanvasZoom, MaxCanvasZoom);
-    }
-
-    private string GetCanvasZoomText()
-    {
-        return $"Zoom {Math.Round(canvasZoom * 100.0, 0).ToString(CultureInfo.InvariantCulture)}%";
-    }
-
     private CancellationToken BeginActiveStrokeSendSession()
     {
         CancelActiveStrokeSendSession();
@@ -669,186 +481,6 @@ public sealed partial class MainWindow : Window
         finally
         {
             source.Dispose();
-        }
-    }
-
-    private bool TryHandlePanelTabShortcut(VirtualKey key)
-    {
-        if (RightPanelTabView is null)
-        {
-            return false;
-        }
-
-        int targetIndex = key switch
-        {
-            VirtualKey.F1 => 0,
-            VirtualKey.F2 => 1,
-            VirtualKey.F3 => 2,
-            _ => -1
-        };
-
-        if (targetIndex < 0 || targetIndex >= RightPanelTabView.TabItems.Count)
-        {
-            return false;
-        }
-
-        RightPanelTabView.SelectedIndex = targetIndex;
-        return true;
-    }
-
-    private bool IsTextInputFocused()
-    {
-        if (Content is not FrameworkElement root || root.XamlRoot is null)
-        {
-            return false;
-        }
-
-        return FocusManager.GetFocusedElement(root.XamlRoot) is TextBox;
-    }
-
-    private void StrokeColorComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (isUpdatingColorSelection)
-        {
-            return;
-        }
-
-        ApplySelectedColorHex(GetSelectedStrokeColorHex(), syncComboSelection: false, trackRecent: true);
-    }
-
-    private void StrokeThicknessComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        selectedStrokeThickness = GetSelectedStrokeThickness();
-        UpdateToolStatusText();
-    }
-
-    private void CustomColorTextBox_KeyDown(object sender, KeyRoutedEventArgs e)
-    {
-        if (e.Key != VirtualKey.Enter)
-        {
-            return;
-        }
-
-        e.Handled = true;
-        ApplyCustomColorFromInput();
-    }
-
-    private void ApplyCustomColorButton_Click(object sender, RoutedEventArgs e)
-    {
-        ApplyCustomColorFromInput();
-    }
-
-    private void ColorSwatchButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is not Button colorButton || colorButton.Tag is not string swatchHex)
-        {
-            return;
-        }
-
-        ApplySelectedColorHex(swatchHex, syncComboSelection: true, trackRecent: true);
-    }
-
-    private void AdvancedColorPicker_ColorChanged(ColorPicker sender, ColorChangedEventArgs args)
-    {
-        if (isUpdatingColorSelection)
-        {
-            return;
-        }
-
-        string colorHex = ToHexColor(args.NewColor);
-        ApplySelectedColorHex(colorHex, syncComboSelection: true, trackRecent: false);
-    }
-
-    private void AdvancedColorPickerFlyout_Closed(object sender, object e)
-    {
-        TrackRecentColor(selectedStrokeColorHex);
-        RefreshColorSwatchSelection();
-    }
-
-    private void ToolToggleButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is not ToggleButton toolButton)
-        {
-            return;
-        }
-
-        DrawingTool tool = toolButton.Name switch
-        {
-            nameof(LineToolToggleButton) => DrawingTool.Line,
-            nameof(RectangleToolToggleButton) => DrawingTool.Rectangle,
-            nameof(EllipseToolToggleButton) => DrawingTool.Ellipse,
-            nameof(EraserToolToggleButton) => DrawingTool.Eraser,
-            _ => DrawingTool.Pencil
-        };
-
-        SelectDrawingTool(tool);
-    }
-
-    private async void UndoButton_Click(object sender, RoutedEventArgs e)
-    {
-        await SendUndoAsync();
-    }
-
-    private async void RedoButton_Click(object sender, RoutedEventArgs e)
-    {
-        await SendRedoAsync();
-    }
-
-    private async Task SendUndoAsync()
-    {
-        Debug.WriteLine($"[WB-CLIENT][UNDO] Request started. connected={session.IsConnected}, drawing={isDrawing}, shapePreview={isShapePreviewActive}, finalizing={isStrokeFinalizing}, pendingPoints={pendingStrokePoints.Count}, activeStrokeId={(activeStrokeId ?? "<null>")}");
-
-        if (!session.IsConnected)
-        {
-            SetConnectionState("Disconnected", "Connect to a room before undo.");
-            Debug.WriteLine("[WB-CLIENT][UNDO] Blocked: session not connected.");
-            return;
-        }
-
-        if (!CanApplyHistoryAction("Undo"))
-        {
-            Debug.WriteLine("[WB-CLIENT][UNDO] Blocked by CanApplyHistoryAction.");
-            return;
-        }
-
-        try
-        {
-            await session.SendUndoAsync(GetSafeUserName(), CancellationToken.None).ConfigureAwait(false);
-            Debug.WriteLine("[WB-CLIENT][UNDO] Request sent to server.");
-        }
-        catch (Exception exception)
-        {
-            SetConnectionState("Error", $"Undo failed: {exception.Message}");
-            Debug.WriteLine($"[WB-CLIENT][UNDO] Send failed: {exception.Message}");
-        }
-    }
-
-    private async Task SendRedoAsync()
-    {
-        Debug.WriteLine($"[WB-CLIENT][REDO] Request started. connected={session.IsConnected}, drawing={isDrawing}, shapePreview={isShapePreviewActive}, finalizing={isStrokeFinalizing}, pendingPoints={pendingStrokePoints.Count}, activeStrokeId={(activeStrokeId ?? "<null>")}");
-
-        if (!session.IsConnected)
-        {
-            SetConnectionState("Disconnected", "Connect to a room before redo.");
-            Debug.WriteLine("[WB-CLIENT][REDO] Blocked: session not connected.");
-            return;
-        }
-
-        if (!CanApplyHistoryAction("Redo"))
-        {
-            Debug.WriteLine("[WB-CLIENT][REDO] Blocked by CanApplyHistoryAction.");
-            return;
-        }
-
-        try
-        {
-            await session.SendRedoAsync(GetSafeUserName(), CancellationToken.None).ConfigureAwait(false);
-            Debug.WriteLine("[WB-CLIENT][REDO] Request sent to server.");
-        }
-        catch (Exception exception)
-        {
-            SetConnectionState("Error", $"Redo failed: {exception.Message}");
-            Debug.WriteLine($"[WB-CLIENT][REDO] Send failed: {exception.Message}");
         }
     }
 
@@ -890,38 +522,6 @@ public sealed partial class MainWindow : Window
         strokeSendTimer.Stop();
     }
 
-    private bool CanApplyHistoryAction(string actionName)
-    {
-        bool hasStaleDrawingState = !isDrawing &&
-            !isShapePreviewActive &&
-            (activeStrokeId is not null || pendingStrokePoints.Count > 0 || hasSentActiveStrokeStart);
-        if (hasStaleDrawingState)
-        {
-            ResetLocalDrawingState();
-        }
-
-        bool strokeStartPending = activeStrokeStartSendTask is { IsCompleted: false };
-        if (isDrawing || isShapePreviewActive || isStrokeFinalizing || strokeStartPending || pendingStrokePoints.Count > 0)
-        {
-            Debug.WriteLine($"[WB-CLIENT][{actionName.ToUpperInvariant()}] Blocked. drawing={isDrawing}, shapePreview={isShapePreviewActive}, finalizing={isStrokeFinalizing}, strokeStartPending={strokeStartPending}, pendingPoints={pendingStrokePoints.Count}, activeStrokeId={(activeStrokeId ?? "<null>")}");
-
-            if (isStrokeFinalizing)
-            {
-                SetStatus($"{actionName} is unavailable while finishing the previous stroke. Try again in a moment.");
-            }
-            else
-            {
-                SetStatus($"{actionName} is unavailable while drawing. Release pointer and try again.");
-            }
-
-            return false;
-        }
-
-        Debug.WriteLine($"[WB-CLIENT][{actionName.ToUpperInvariant()}] Allowed.");
-
-        return true;
-    }
-
     private void TrackLocalStroke(string strokeId)
     {
         if (string.IsNullOrWhiteSpace(strokeId))
@@ -946,275 +546,9 @@ public sealed partial class MainWindow : Window
         return !string.IsNullOrWhiteSpace(strokeId) && localStrokeIds.Contains(strokeId);
     }
 
-    private async void RefreshRoomsButton_Click(object sender, RoutedEventArgs e)
-    {
-        await RefreshRoomsAsync(DiscoveryRefreshOrigin.Manual);
-    }
-
-    private async Task RefreshRoomsAsync(DiscoveryRefreshOrigin origin)
-    {
-        if (isWindowClosed)
-        {
-            return;
-        }
-
-        if (Interlocked.Exchange(ref refreshRoomsInProgress, 1) == 1)
-        {
-            return;
-        }
-
-        bool isBackgroundRefresh = origin == DiscoveryRefreshOrigin.Background;
-        bool shouldDisableRefreshButton = origin == DiscoveryRefreshOrigin.Manual;
-        CancellationToken refreshToken = refreshRoomsCancellationSource.Token;
-
-        try
-        {
-            if (shouldDisableRefreshButton)
-            {
-                if (DispatcherQueue.HasThreadAccess)
-                {
-                    RefreshRoomsButton.IsEnabled = false;
-                }
-                else
-                {
-                    DispatcherQueue.TryEnqueue(() =>
-                    {
-                        if (!isWindowClosed)
-                        {
-                            RefreshRoomsButton.IsEnabled = false;
-                        }
-                    });
-                }
-            }
-
-            bool shouldAnnounceScanning = !isBackgroundRefresh && !session.IsConnected;
-            if (shouldAnnounceScanning)
-            {
-                SetConnectionState("Discovering", "Scanning LAN for rooms...");
-            }
-
-            IReadOnlyList<DiscoveredRoom> foundRooms = await discoveryClient
-                .DiscoverAsync(DiscoveryProtocol.DefaultDiscoveryPort, string.Empty, refreshToken)
-                .ConfigureAwait(false);
-
-            if (refreshToken.IsCancellationRequested || isWindowClosed)
-            {
-                return;
-            }
-
-            IReadOnlyList<DiscoveredRoom> safeRooms = foundRooms ?? Array.Empty<DiscoveredRoom>();
-
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                if (isWindowClosed)
-                {
-                    return;
-                }
-
-                bool roomsChanged = ApplyDiscoveredRooms(safeRooms);
-
-                if (!session.IsConnected && (shouldAnnounceScanning || (isBackgroundRefresh && roomsChanged)))
-                {
-                    SetConnectionState("Disconnected", BuildDiscoveryStatusMessage(rooms.Count));
-                }
-            });
-        }
-        catch (OperationCanceledException) when (refreshRoomsCancellationSource.IsCancellationRequested || isWindowClosed)
-        {
-        }
-        catch (Exception exception)
-        {
-            if (!isBackgroundRefresh && !isWindowClosed)
-            {
-                SetConnectionState("Error", $"Discovery error: {exception.Message}");
-            }
-        }
-        finally
-        {
-            if (shouldDisableRefreshButton && !isWindowClosed)
-            {
-                if (DispatcherQueue.HasThreadAccess)
-                {
-                    RefreshRoomsButton.IsEnabled = true;
-                }
-                else
-                {
-                    DispatcherQueue.TryEnqueue(() =>
-                    {
-                        if (!isWindowClosed)
-                        {
-                            RefreshRoomsButton.IsEnabled = true;
-                        }
-                    });
-                }
-            }
-
-            Interlocked.Exchange(ref refreshRoomsInProgress, 0);
-        }
-    }
-
-    private async void ConnectButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (session.IsConnected)
-        {
-            await DisconnectAsync();
-            return;
-        }
-
-        if (RoomListView.SelectedItem is not DiscoveredRoom room)
-        {
-            SetStatus("Select a discovered room first.");
-            return;
-        }
-
-        if (room.ProtocolVersion is not int protocolVersion ||
-            protocolVersion != DiscoveryProtocol.CurrentProtocolVersion)
-        {
-            string roomProtocolText = room.ProtocolVersion?.ToString() ?? "unknown";
-            SetConnectionState(
-                "Error",
-                $"Incompatible room protocol ({roomProtocolText}). Expected protocol {DiscoveryProtocol.CurrentProtocolVersion}. Rebuild/restart the server.");
-            return;
-        }
-
-        string userName = GetSafeUserName();
-
-        try
-        {
-            SetConnectionState("Connecting", $"Connecting to {room.Endpoint}...");
-            await session
-                .ConnectAsync(room.Address, room.TcpPort, userName, CancellationToken.None);
-
-            connectedEndpoint = room.Endpoint;
-            SetConnectionState("Connected", $"Connected to {connectedEndpoint}");
-            BeginChatSession(room.Title, room.Endpoint);
-        }
-        catch (Exception exception)
-        {
-            SetConnectionState("Error", $"Connect failed: {exception.Message}");
-        }
-    }
-
-    private async Task DisconnectAsync()
-    {
-        await session.DisconnectAsync();
-        SetConnectionState("Disconnected", "Disconnected by user.");
-        AppendChatLine("[System] Disconnected.");
-    }
-
-    private async void SendChatButton_Click(object sender, RoutedEventArgs e)
-    {
-        await SendChatAsync();
-    }
-
-    private async void ChatInputTextBox_KeyDown(object sender, KeyRoutedEventArgs e)
-    {
-        if (e.Key != VirtualKey.Enter)
-        {
-            return;
-        }
-
-        e.Handled = true;
-        await SendChatAsync();
-    }
-
-    private async Task SendChatAsync()
-    {
-        if (!session.IsConnected)
-        {
-            SetConnectionState("Disconnected", "Connect to a room before sending messages.");
-            return;
-        }
-
-        string text = ChatInputTextBox.Text.Trim();
-        if (text.Length == 0)
-        {
-            return;
-        }
-
-        ChatInputTextBox.Text = string.Empty;
-
-        try
-        {
-            await session.SendChatAsync(GetSafeUserName(), text, CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (Exception exception)
-        {
-            SetConnectionState("Error", $"Send chat failed: {exception.Message}");
-        }
-    }
-
-    private string GetSafeUserName()
-    {
-        if (!DispatcherQueue.HasThreadAccess)
-        {
-            if (!string.IsNullOrWhiteSpace(lastKnownUserName))
-            {
-                return lastKnownUserName;
-            }
-
-            return $"User-{Environment.MachineName}";
-        }
-
-        string userName = UserNameTextBox.Text.Trim();
-        if (userName.Length == 0)
-        {
-            userName = $"User-{Environment.MachineName}";
-            UserNameTextBox.Text = userName;
-        }
-
-        lastKnownUserName = userName;
-        return userName;
-    }
-
-    private void SetStatus(string status)
-    {
-        if (DispatcherQueue.HasThreadAccess)
-        {
-            ConnectionStatusTextBlock.Text = status;
-            return;
-        }
-
-        DispatcherQueue.TryEnqueue(() => ConnectionStatusTextBlock.Text = status);
-    }
-
-    private void SetConnectionState(string state, string detail)
-    {
-        if (string.Equals(connectionState, state, StringComparison.OrdinalIgnoreCase) &&
-            !string.Equals(state, "Error", StringComparison.OrdinalIgnoreCase))
-        {
-            SetStatus(string.IsNullOrWhiteSpace(detail) ? state : $"{state}: {detail}");
-            if (DispatcherQueue.HasThreadAccess)
-            {
-                UpdateConnectionControls(state);
-            }
-            else
-            {
-                DispatcherQueue.TryEnqueue(() => UpdateConnectionControls(state));
-            }
-
-            return;
-        }
-
-        connectionState = state;
-
-        string statusText = string.IsNullOrWhiteSpace(detail)
-            ? state
-            : $"{state}: {detail}";
-
-        SetStatus(statusText);
-
-        if (DispatcherQueue.HasThreadAccess)
-        {
-            UpdateConnectionControls(state);
-            return;
-        }
-
-        DispatcherQueue.TryEnqueue(() =>
-        {
-            UpdateConnectionControls(state);
-        });
-    }
+    // Called when AUTH_FAILED arrives during a first-user mode attempt, meaning a concurrent
+    // client committed a password before us. Re-pings the server to get the authoritative
+    // post-race state, refreshes the room list entry, and guides the user to enter the password.
 
     private void InitializeThemeSelection()
     {
@@ -1258,29 +592,7 @@ public sealed partial class MainWindow : Window
             StrokeColorComboBox.SelectedIndex = 0;
         }
 
-        for (int index = 0; index < StrokeThicknessComboBox.Items.Count; index++)
-        {
-            if (StrokeThicknessComboBox.Items[index] is not ComboBoxItem item)
-            {
-                continue;
-            }
-
-            if (!double.TryParse(item.Tag as string, NumberStyles.Float, CultureInfo.InvariantCulture, out double thickness))
-            {
-                continue;
-            }
-
-            if (Math.Abs(NormalizeStrokeThickness(thickness) - selectedStrokeThickness) < 0.001)
-            {
-                StrokeThicknessComboBox.SelectedIndex = index;
-                break;
-            }
-        }
-
-        if (StrokeThicknessComboBox.SelectedIndex < 0 && StrokeThicknessComboBox.Items.Count > 0)
-        {
-            StrokeThicknessComboBox.SelectedIndex = 0;
-        }
+        StrokeThicknessNumberBox.Value = selectedStrokeThickness;
 
         selectedStrokeColorHex = GetSelectedStrokeColorHex();
         selectedStrokeThickness = GetSelectedStrokeThickness();
@@ -1438,26 +750,6 @@ public sealed partial class MainWindow : Window
         return true;
     }
 
-    private void UpdateConnectionControls(string state)
-    {
-        ConnectButton.Content = session.IsConnected ? "Disconnect" : "Connect";
-        ConnectButton.IsEnabled = !string.Equals(state, "Connecting", StringComparison.OrdinalIgnoreCase);
-        CanvasHintTextBlock.Visibility = session.IsConnected ? Visibility.Collapsed : Visibility.Visible;
-
-        string compactState = GetCompactState(state);
-        ConnectionBadgeTextBlock.Text = compactState;
-        CanvasConnectionTextBlock.Text = compactState;
-
-        ApplyStatusBadge(state);
-
-        if (!session.IsConnected)
-        {
-            CanvasHintTextBlock.Text = string.Equals(state, "Discovering", StringComparison.OrdinalIgnoreCase)
-                ? "Scanning LAN for available rooms..."
-                : "Connect to a room to start drawing in realtime";
-        }
-    }
-
     private void RefreshThemeBoundVisuals()
     {
         RefreshColorSwatchSelection();
@@ -1471,50 +763,6 @@ public sealed partial class MainWindow : Window
         {
             layer.NotifyThemeResourcesChanged();
         }
-    }
-
-    private void ApplyStatusBadge(string state)
-    {
-        string foregroundKey;
-        string backgroundKey;
-
-        if (state.StartsWith("Connection error", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(state, "Error", StringComparison.OrdinalIgnoreCase))
-        {
-            foregroundKey = "ErrorBadgeTextBrush";
-            backgroundKey = "ErrorBadgeBackgroundBrush";
-        }
-        else if (string.Equals(state, "Connected", StringComparison.OrdinalIgnoreCase))
-        {
-            foregroundKey = "PositiveBadgeTextBrush";
-            backgroundKey = "PositiveBadgeBackgroundBrush";
-        }
-        else if (string.Equals(state, "Connecting", StringComparison.OrdinalIgnoreCase) ||
-                 string.Equals(state, "Discovering", StringComparison.OrdinalIgnoreCase))
-        {
-            foregroundKey = "WarningBadgeTextBrush";
-            backgroundKey = "WarningBadgeBackgroundBrush";
-        }
-        else
-        {
-            foregroundKey = "BadgeTextBrush";
-            backgroundKey = "BadgeBackgroundBrush";
-        }
-
-        Brush foregroundBrush = ResolveThemeBrush(foregroundKey);
-        Brush backgroundBrush = ResolveThemeBrush(backgroundKey);
-
-        ConnectionBadgeBorder.Background = backgroundBrush;
-        CanvasConnectionBadgeBorder.Background = backgroundBrush;
-
-        ConnectionBadgeBorder.BorderBrush = foregroundBrush;
-        CanvasConnectionBadgeBorder.BorderBrush = foregroundBrush;
-
-        ConnectionStateDot.Fill = foregroundBrush;
-        CanvasConnectionStateDot.Fill = foregroundBrush;
-
-        ConnectionBadgeTextBlock.Foreground = foregroundBrush;
-        CanvasConnectionTextBlock.Foreground = foregroundBrush;
     }
 
     private static Brush ResolveThemeBrush(string key)

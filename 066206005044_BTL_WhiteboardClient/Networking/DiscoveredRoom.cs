@@ -14,12 +14,19 @@ public sealed class DiscoveredRoom
 
     public int? ProtocolVersion { get; init; }
 
+    public bool IsPasswordProtected { get; init; }
+
+    public string? OwnerUserName { get; init; }
+
+    public bool IsFirstUserMode { get; init; }
+
     public string Title => $"{RoomName} - {ServerName}";
 
     public string Endpoint => $"{Address}:{TcpPort}";
 
     public override string ToString()
     {
-        return $"{Title} ({Endpoint})";
+        string ownerInfo = string.IsNullOrEmpty(OwnerUserName) ? "" : $" (host: {OwnerUserName})";
+        return $"{Title}{ownerInfo} ({Endpoint})";
     }
 }

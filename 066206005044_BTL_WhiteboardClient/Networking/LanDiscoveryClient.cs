@@ -7,7 +7,7 @@ namespace Btl.Whiteboard.Client.Networking;
 
 public sealed class LanDiscoveryClient
 {
-    private static readonly TimeSpan RoomCacheTtl = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan RoomCacheTtl = TimeSpan.FromSeconds(3);
 
     private readonly Dictionary<string, CachedRoom> roomCache = new(StringComparer.Ordinal);
     private readonly object roomCacheLock = new();
@@ -85,7 +85,10 @@ public sealed class LanDiscoveryClient
                 RoomName = response.RoomName,
                 Address = received.RemoteEndPoint.Address.ToString(),
                 TcpPort = response.TcpPort,
-                ProtocolVersion = response.ProtocolVersion
+                ProtocolVersion = response.ProtocolVersion,
+                IsPasswordProtected = response.IsPasswordProtected,
+                OwnerUserName = response.OwnerUserName,
+                IsFirstUserMode = response.IsFirstUserMode
             };
         }
 
@@ -227,4 +230,83 @@ public sealed class LanDiscoveryClient
     }
 
     private sealed record CachedRoom(DiscoveredRoom Room, DateTimeOffset LastSeenUtc);
+    // Sends a unicast UDP query to a specific server and returns fresh room state.
+    // Bypasses the cache so the caller always gets a server-current IsFirstUserMode value.
+    public async Task<DiscoveredRoom?> PingServerAsync(string address, int discoveryPort, CancellationToken cancellationToken)
+    {
+        if (!IPAddress.TryParse(address, out IPAddress? ipAddress))
+        {
+            return null;
+        }
+
+        using UdpClient udpClient = new();
+
+        DiscoveryQueryPayload query = new(
+            DiscoveryProtocol.ApplicationId,
+            string.Empty,
+            DiscoveryProtocol.CurrentProtocolVersion);
+        byte[] queryDatagram = DiscoveryProtocol.ToDatagram(query);
+
+        try
+        {
+            await udpClient.SendAsync(queryDatagram, new IPEndPoint(ipAddress, discoveryPort), cancellationToken).ConfigureAwait(false);
+        }
+        catch (SocketException)
+        {
+            return null;
+        }
+
+        using CancellationTokenSource timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutSource.CancelAfter(TimeSpan.FromMilliseconds(500));
+
+        while (!timeoutSource.Token.IsCancellationRequested)
+        {
+            UdpReceiveResult received;
+            try
+            {
+                received = await udpClient.ReceiveAsync(timeoutSource.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (SocketException)
+            {
+                break;
+            }
+
+            bool parsed = DiscoveryProtocol.TryParseDatagram<DiscoveryResponsePayload>(received.Buffer, out DiscoveryResponsePayload? response);
+            if (!parsed || response is null)
+            {
+                continue;
+            }
+
+            if (!string.Equals(response.AppId, DiscoveryProtocol.ApplicationId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            DiscoveredRoom freshRoom = new()
+            {
+                ServerId = response.ServerId,
+                ServerName = response.ServerName,
+                RoomName = response.RoomName,
+                Address = received.RemoteEndPoint.Address.ToString(),
+                TcpPort = response.TcpPort,
+                ProtocolVersion = response.ProtocolVersion,
+                IsPasswordProtected = response.IsPasswordProtected,
+                OwnerUserName = response.OwnerUserName,
+                IsFirstUserMode = response.IsFirstUserMode
+            };
+
+            lock (roomCacheLock)
+            {
+                roomCache[response.ServerId] = new CachedRoom(freshRoom, DateTimeOffset.UtcNow);
+            }
+
+            return freshRoom;
+        }
+
+        return null;
+    }
 }

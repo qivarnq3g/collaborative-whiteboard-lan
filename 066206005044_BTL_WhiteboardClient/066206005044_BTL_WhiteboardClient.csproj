@@ -6,7 +6,7 @@
     <PlatformTarget>x64</PlatformTarget>
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
     <AssemblyName>BtlWhiteboardClient</AssemblyName>
-    <RootNamespace>BtlWhiteboardClient</RootNamespace>
+    <RootNamespace>Btl.Whiteboard.Client</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <UseWinUI>true</UseWinUI>
     <EnableMsixTooling>true</EnableMsixTooling>

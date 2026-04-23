@@ -17,12 +17,13 @@ internal sealed partial class WhiteboardServer
 		return new StrokeCommandPayload(
 			eventType,
 			payload.StrokeId,
-			payload.X,
-			payload.Y,
+			payload.UserId,
 			payload.UserName,
 			payload.ColorHex,
 			payload.Thickness,
-			payload.LayerId);
+			payload.LayerId,
+			payload.X,
+			payload.Y);
 	}
 
 	private static StrokeCommandPayload Convert(StrokePointPayload payload, string eventType)
@@ -30,12 +31,13 @@ internal sealed partial class WhiteboardServer
 		return new StrokeCommandPayload(
 			eventType,
 			payload.StrokeId,
-			payload.X,
-			payload.Y,
+			payload.UserId,
 			payload.UserName,
 			payload.ColorHex,
 			payload.Thickness,
-			payload.LayerId);
+			payload.LayerId,
+			payload.X,
+			payload.Y);
 	}
 
 	private static StrokeCommandPayload Convert(StrokeEndPayload payload, string eventType)
@@ -43,12 +45,13 @@ internal sealed partial class WhiteboardServer
 		return new StrokeCommandPayload(
 			eventType,
 			payload.StrokeId,
-			payload.X,
-			payload.Y,
+			payload.UserId,
 			payload.UserName,
 			payload.ColorHex,
 			payload.Thickness,
-			payload.LayerId);
+			payload.LayerId,
+			payload.X,
+			payload.Y);
 	}
 
 	private bool TryApplyStrokeCommand(
@@ -148,7 +151,7 @@ internal sealed partial class WhiteboardServer
 		}
 	}
 
-	private bool TryUndoLastStroke()
+	private bool TryUndoLastStrokeForUser(string userId)
 	{
 		lock (historyLock)
 		{
@@ -156,7 +159,8 @@ internal sealed partial class WhiteboardServer
 			for (int index = strokeHistory.Count - 1; index >= 0; index--)
 			{
 				StrokeCommandPayload command = strokeHistory[index];
-				if (string.Equals(command.EventType, "end", StringComparison.Ordinal))
+				if (string.Equals(command.EventType, "end", StringComparison.Ordinal) &&
+					string.Equals(command.UserId, userId, StringComparison.Ordinal))
 				{
 					strokeId = command.StrokeId;
 					break;
@@ -183,7 +187,7 @@ internal sealed partial class WhiteboardServer
 		}
 	}
 
-	private bool TryRedoLastStroke()
+	private bool TryRedoLastStrokeForUser(string userId)
 	{
 		lock (historyLock)
 		{
@@ -192,8 +196,35 @@ internal sealed partial class WhiteboardServer
 				return false;
 			}
 
-			List<StrokeCommandPayload> restoredCommands = redoHistory.Pop();
-			strokeHistory.AddRange(restoredCommands);
+			Stack<List<StrokeCommandPayload>> tempStack = new();
+			List<StrokeCommandPayload>? foundCommands = null;
+
+			while (redoHistory.Count > 0)
+			{
+				List<StrokeCommandPayload> commands = redoHistory.Pop();
+				string? ownerId = commands.FirstOrDefault()?.UserId;
+
+				if (foundCommands is null && string.Equals(ownerId, userId, StringComparison.Ordinal))
+				{
+					foundCommands = commands;
+				}
+				else
+				{
+					tempStack.Push(commands);
+				}
+			}
+
+			while (tempStack.Count > 0)
+			{
+				redoHistory.Push(tempStack.Pop());
+			}
+
+			if (foundCommands is null)
+			{
+				return false;
+			}
+
+			strokeHistory.AddRange(foundCommands);
 			TrimHistoryIfNeeded();
 			return true;
 		}

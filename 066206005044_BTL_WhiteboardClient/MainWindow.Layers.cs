@@ -153,7 +153,7 @@ public sealed partial class MainWindow
     {
         if (GetSelectedLayerCount() > 1)
         {
-            SetStatus("Select a single layer to duplicate.");
+            SetStatus("Select one layer to duplicate");
             return;
         }
 
@@ -192,7 +192,7 @@ public sealed partial class MainWindow
 
         if (layers.Count - selectedLayers.Count < 1)
         {
-            SetConnectionState("Error", "At least one layer is required.");
+            SetConnectionState("Error", "Keep at least one layer");
             return;
         }
 
@@ -232,7 +232,7 @@ public sealed partial class MainWindow
     {
         if (GetSelectedLayerCount() > 1)
         {
-            SetStatus("Select a single layer to move up.");
+            SetStatus("Select one layer to move up");
             return;
         }
 
@@ -252,7 +252,7 @@ public sealed partial class MainWindow
     {
         if (GetSelectedLayerCount() > 1)
         {
-            SetStatus("Select a single layer to move down.");
+            SetStatus("Select one layer to move down");
             return;
         }
 
@@ -272,7 +272,7 @@ public sealed partial class MainWindow
     {
         if (GetSelectedLayerCount() > 1)
         {
-            SetStatus("Select a single layer to merge.");
+            SetStatus("Select one layer to merge");
             return;
         }
 
@@ -280,7 +280,7 @@ public sealed partial class MainWindow
         int sourceIndex = layers.IndexOf(sourceLayer);
         if (sourceIndex <= 0)
         {
-            SetConnectionState("Error", "Cannot merge down the bottom layer.");
+            SetConnectionState("Error", "Can't merge the bottom layer");
             return;
         }
 
@@ -581,6 +581,11 @@ public sealed partial class MainWindow
 
     private void RefreshLayerComboSelection()
     {
+        if (ActiveLayerComboBox is null || LayersListView is null)
+        {
+            return;
+        }
+
         LayerState? selectedLayer = layersById.TryGetValue(activeLayerId, out LayerState? layer)
             ? layer
             : layers.FirstOrDefault();
@@ -621,8 +626,7 @@ public sealed partial class MainWindow
 
     private void UpdateLayerPanelVisuals(LayerState activeLayer)
     {
-        if (LayersCountTextBlock is null ||
-            LayersEmptyTextBlock is null ||
+        if (LayersEmptyTextBlock is null ||
             LayerDuplicateButton is null ||
             LayerDeleteButton is null ||
             LayerMoveUpButton is null ||
@@ -634,7 +638,6 @@ public sealed partial class MainWindow
             return;
         }
 
-        LayersCountTextBlock.Text = layers.Count.ToString(CultureInfo.InvariantCulture);
         LayersEmptyTextBlock.Visibility = layers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
         int activeIndex = layers.IndexOf(activeLayer);
@@ -666,7 +669,7 @@ public sealed partial class MainWindow
         ToolTipService.SetToolTip(
             LayerDuplicateButton,
             selectedCount > 1
-                ? "Select a single layer to duplicate."
+                ? "Select one layer to duplicate"
                 : "Create a copy of the selected layer.");
 
         ToolTipService.SetToolTip(
@@ -675,12 +678,12 @@ public sealed partial class MainWindow
                 ? selectedCount > 1
                     ? $"Delete {selectedCount} selected layers and move strokes to a fallback layer."
                     : "Delete selected layer and move strokes to a fallback layer."
-                : "At least one layer must remain.");
+                : "Keep at least one layer");
 
         ToolTipService.SetToolTip(
             LayerMoveUpButton,
             selectedCount > 1
-                ? "Select a single layer to move up."
+                ? "Select one layer to move up"
                 : activeIndex > 0
                 ? "Move selected layer one step up."
                 : "Top layer cannot move further up.");
@@ -688,7 +691,7 @@ public sealed partial class MainWindow
         ToolTipService.SetToolTip(
             LayerMoveDownButton,
             selectedCount > 1
-                ? "Select a single layer to move down."
+                ? "Select one layer to move down"
                 : activeIndex >= 0 && activeIndex < layers.Count - 1
                 ? "Move selected layer one step down."
                 : "Bottom layer cannot move further down.");
@@ -696,7 +699,7 @@ public sealed partial class MainWindow
         ToolTipService.SetToolTip(
             LayerMergeDownButton,
             selectedCount > 1
-                ? "Select a single layer to merge."
+                ? "Select one layer to merge"
                 : activeIndex > 0
                 ? "Merge selected layer into the layer below."
                 : "No lower layer available to merge into.");
@@ -716,6 +719,11 @@ public sealed partial class MainWindow
 
     private void ReassignLayerShapes(string sourceLayerId, string targetLayerId)
     {
+        if (DrawingCanvas is null)
+        {
+            return;
+        }
+
         foreach (Shape shape in DrawingCanvas.Children.OfType<Shape>())
         {
             if (!string.Equals(shape.Tag as string, sourceLayerId, StringComparison.Ordinal))
@@ -753,6 +761,11 @@ public sealed partial class MainWindow
 
     private void ApplyLayerVisualState(string layerId)
     {
+        if (DrawingCanvas is null)
+        {
+            return;
+        }
+
         if (!layersById.TryGetValue(layerId, out LayerState? layer))
         {
             return;

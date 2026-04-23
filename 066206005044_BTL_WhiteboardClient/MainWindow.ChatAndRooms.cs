@@ -14,7 +14,7 @@ public sealed partial class MainWindow
     private void BeginChatSession(string roomTitle, string endpoint)
     {
         ResetChatSession();
-        AppendChatLine($"[System] Connected to {roomTitle} ({endpoint})");
+        AppendChatLine($"Connected to \"{roomTitle}\"");
     }
 
     private void ResetChatSession()
@@ -185,7 +185,6 @@ public sealed partial class MainWindow
 
     private void UpdateRoomVisuals()
     {
-        RoomCountTextBlock.Text = rooms.Count == 1 ? "1 room" : $"{rooms.Count} rooms";
         RoomEmptyTextBlock.Visibility = rooms.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
@@ -237,8 +236,8 @@ public sealed partial class MainWindow
     {
         int count = onlineUsers.Count;
         OnlineUsersCountTextBlock.Text = count.ToString();
-        CanvasOnlineCountTextBlock.Text = count == 1 ? "1 online" : $"{count} online";
         OnlineUsersEmptyTextBlock.Visibility = count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        UpdateHostControlsVisibility();
     }
 
     private void UpdateChatVisuals()
@@ -275,8 +274,8 @@ public sealed partial class MainWindow
     private static string BuildDiscoveryStatusMessage(int roomCount)
     {
         return roomCount == 0
-            ? $"No rooms discovered. Verify server is running and allow UDP {DiscoveryProtocol.DefaultDiscoveryPort} / TCP {DiscoveryProtocol.DefaultTcpPort} in Windows Firewall."
-            : $"Found {roomCount} room(s) in LAN.";
+            ? "No rooms found. Check server status."
+            : $"{roomCount} {(roomCount == 1 ? "room" : "rooms")} found";
     }
 
     private static string BuildRoomSignature(IEnumerable<DiscoveredRoom> discoveredRooms)

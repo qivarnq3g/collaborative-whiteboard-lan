@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory).artifacts\obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**\obj\**;**\bin\**;**/obj/**;**/bin/**</DefaultItemExcludes>
+  </PropertyGroup>
+</Project>

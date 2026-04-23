@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Btl.Whiteboard.Client.Networking;
 using Btl.Whiteboard.Contracts;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
@@ -70,7 +71,7 @@ public sealed partial class MainWindow
 
         if (!session.IsConnected)
         {
-            SetConnectionState("Disconnected", "Connect to a room before drawing.");
+            SetConnectionState("Disconnected", "Connect to a room to draw");
             return;
         }
 
@@ -85,13 +86,13 @@ public sealed partial class MainWindow
         LayerState activeLayer = GetActiveLayerState();
         if (!activeLayer.IsVisible)
         {
-            SetConnectionState("Error", $"{activeLayer.Name} is hidden. Enable visibility before drawing.");
+            SetConnectionState("Error", $"Show \"{activeLayer.Name}\" layer to draw");
             return;
         }
 
         if (activeLayer.IsLocked)
         {
-            SetConnectionState("Error", $"{activeLayer.Name} is locked. Unlock it before drawing.");
+            SetConnectionState("Error", $"Unlock \"{activeLayer.Name}\" layer to draw");
             return;
         }
 
@@ -138,6 +139,7 @@ public sealed partial class MainWindow
             activeStrokeId,
             point.X,
             point.Y,
+            session.LocalSenderId,
             GetSafeUserName(),
             activeStrokeColorHex,
             activeStrokeThickness,
@@ -149,6 +151,7 @@ public sealed partial class MainWindow
             activeStrokeId,
             point.X,
             point.Y,
+            session.LocalSenderId,
             GetSafeUserName(),
             activeStrokeColorHex,
             activeStrokeThickness,
@@ -214,6 +217,7 @@ public sealed partial class MainWindow
         }
 
         string strokeId = activeStrokeId;
+        string userId = session.LocalSenderId;
         string userName = GetSafeUserName();
 
         foreach (Point sampledPoint in sampledPoints)
@@ -222,6 +226,7 @@ public sealed partial class MainWindow
                 strokeId,
                 sampledPoint.X,
                 sampledPoint.Y,
+                userId,
                 userName,
                 activeStrokeColorHex,
                 activeStrokeThickness,
@@ -295,6 +300,7 @@ public sealed partial class MainWindow
             }
 
             string strokeId = activeStrokeId;
+            string userId = session.LocalSenderId;
             string userName = GetSafeUserName();
 
             isDrawing = false;
@@ -317,6 +323,7 @@ public sealed partial class MainWindow
                 strokeId,
                 point.X,
                 point.Y,
+                session.LocalSenderId,
                 userName,
                 activeStrokeColorHex,
                 activeStrokeThickness,
@@ -355,6 +362,7 @@ public sealed partial class MainWindow
                 strokeId,
                 point.X,
                 point.Y,
+                userId,
                 userName,
                 activeStrokeColorHex,
                 activeStrokeThickness,
@@ -538,6 +546,7 @@ public sealed partial class MainWindow
         }
 
         string strokeId = activeStrokeId;
+        string userId = session.LocalSenderId;
         string userName = GetSafeUserName();
         int sendLimit = MaxStrokePointsPerFlush;
         int sentCount = 0;
@@ -560,6 +569,7 @@ public sealed partial class MainWindow
                     strokeId,
                     point.X,
                     point.Y,
+                    userId,
                     userName,
                     activeStrokeColorHex,
                     activeStrokeThickness,
@@ -717,6 +727,12 @@ public sealed partial class MainWindow
                 if (string.Equals(state, "Connected", StringComparison.OrdinalIgnoreCase))
                 {
                     SetConnectionState("Connected", string.IsNullOrWhiteSpace(connectedEndpoint) ? "Connected" : $"Connected to {connectedEndpoint}");
+                    if (chatMessages.Count == 0)
+                    {
+                        string roomTitle = (RoomListView.SelectedItem as DiscoveredRoom)?.Title ?? "Selected room";
+                        BeginChatSession(roomTitle, connectedEndpoint);
+                    }
+
                     return;
                 }
 
@@ -724,6 +740,16 @@ public sealed partial class MainWindow
                 {
                     ResetLocalDrawingState();
                     SetConnectionState("Error", state);
+                    return;
+                }
+
+                if (state.StartsWith("Kicked:", StringComparison.OrdinalIgnoreCase) ||
+                    state.StartsWith("Banned:", StringComparison.OrdinalIgnoreCase) ||
+                    state.StartsWith("Room locked:", StringComparison.OrdinalIgnoreCase))
+                {
+                    ResetLocalDrawingState();
+                    ResetOwnershipState();
+                    SetConnectionState("Disconnected", state);
                     return;
                 }
 
@@ -786,11 +812,23 @@ public sealed partial class MainWindow
                 case WhiteboardMessageType.PresenceSnapshot:
                     PresenceSnapshotPayload snapshotPayload = envelope.ReadPayload<PresenceSnapshotPayload>();
                     onlineUsers.Clear();
+                    bool currentUserIsOwner = string.Equals(snapshotPayload.RoomOwnerId, session.LocalSenderId, StringComparison.Ordinal);
                     foreach (PresenceUserPayload user in snapshotPayload.Users)
                     {
-                        onlineUsers.Add(user.UserName);
+                        knownUserNames[user.UserId] = user.UserName;
+                        bool isOwner = string.Equals(user.UserId, snapshotPayload.RoomOwnerId, StringComparison.Ordinal);
+                        onlineUsers.Add(new OnlineUserItem
+                        {
+                            UserId = user.UserId,
+                            UserName = user.UserName,
+                            IsOwner = isOwner,
+                            CanModerate = currentUserIsOwner &&
+                                          !string.Equals(user.UserId, session.LocalSenderId, StringComparison.Ordinal) &&
+                                          !isOwner
+                        });
                     }
 
+                    UpdateOwnershipDisplay(snapshotPayload.RoomOwnerId, null);
                     UpdateOnlineUserVisuals();
                     break;
 
@@ -799,6 +837,18 @@ public sealed partial class MainWindow
                     AppendChatLine(
                         $"[System] {joinedPayload.UserName} joined the room.",
                         BuildChatMessageKey(envelope));
+                    knownUserNames[joinedPayload.UserId] = joinedPayload.UserName;
+                    bool isJoinedOwner = string.Equals(joinedPayload.UserId, roomOwnerId, StringComparison.Ordinal);
+                    onlineUsers.Add(new OnlineUserItem
+                    {
+                        UserId = joinedPayload.UserId,
+                        UserName = joinedPayload.UserName,
+                        IsOwner = isJoinedOwner,
+                        CanModerate = IsCurrentUserOwner() &&
+                                      !string.Equals(joinedPayload.UserId, session.LocalSenderId, StringComparison.Ordinal) &&
+                                      !isJoinedOwner
+                    });
+                    UpdateOnlineUserVisuals();
                     break;
 
                 case WhiteboardMessageType.UserLeft:
@@ -806,6 +856,21 @@ public sealed partial class MainWindow
                     AppendChatLine(
                         $"[System] {leftPayload.UserName} left the room.",
                         BuildChatMessageKey(envelope));
+                    OnlineUserItem? toRemove = null;
+                    foreach (OnlineUserItem item in onlineUsers)
+                    {
+                        if (string.Equals(item.UserId, leftPayload.UserId, StringComparison.Ordinal))
+                        {
+                            toRemove = item;
+                            break;
+                        }
+                    }
+                    if (toRemove is not null)
+                    {
+                        onlineUsers.Remove(toRemove);
+                    }
+
+                    UpdateOnlineUserVisuals();
                     break;
 
                 case WhiteboardMessageType.StrokeStart:
@@ -843,6 +908,61 @@ public sealed partial class MainWindow
 
                 case WhiteboardMessageType.CanvasSnapshot:
                     RenderCanvasSnapshot(envelope.ReadPayload<CanvasSnapshotPayload>());
+                    break;
+
+                case WhiteboardMessageType.RoomStateInfo:
+                    RoomStateInfoPayload roomStatePayload = envelope.ReadPayload<RoomStateInfoPayload>();
+                    isRoomLocked = roomStatePayload.IsRoomLocked;
+                    ApplyAuthoritativeRoomState(roomStatePayload);
+                    UpdateOwnershipDisplay(roomStatePayload.RoomOwnerId, roomStatePayload.RoomOwnerUserName);
+                    UpdateRoomLockVisuals();
+                    UpdatePasswordInputGuidance();
+                    break;
+
+                case WhiteboardMessageType.OwnerAssigned:
+                    OwnerAssignedPayload ownerPayload = envelope.ReadPayload<OwnerAssignedPayload>();
+                    UpdateOwnershipDisplay(ownerPayload.OwnerId, ownerPayload.OwnerUserName);
+                    break;
+
+                case WhiteboardMessageType.RoomLocked:
+                    RoomLockedPayload roomLockedPayload = envelope.ReadPayload<RoomLockedPayload>();
+                    isRoomLocked = true;
+                    UpdateRoomLockVisuals();
+                    SetStatus(string.IsNullOrWhiteSpace(roomLockedPayload.Reason)
+                        ? "Room is now locked by owner."
+                        : $"Room locked: {roomLockedPayload.Reason}");
+                    break;
+
+                case WhiteboardMessageType.UnlockRoom:
+                    isRoomLocked = false;
+                    UpdateRoomLockVisuals();
+                    SetStatus("Room unlocked by owner.");
+                    break;
+
+                case WhiteboardMessageType.BanListSnapshot:
+                    BanListPayload banListPayload = envelope.ReadPayload<BanListPayload>();
+                    ApplyBanListSnapshot(banListPayload.UserIds);
+                    break;
+
+                case WhiteboardMessageType.UserRenamed:
+                    UserRenamedPayload renamedPayload = envelope.ReadPayload<UserRenamedPayload>();
+                    knownUserNames[renamedPayload.UserId] = renamedPayload.NewUserName;
+                    foreach (OnlineUserItem userItem in onlineUsers)
+                    {
+                        if (string.Equals(userItem.UserId, renamedPayload.UserId, StringComparison.Ordinal))
+                        {
+                            int idx = onlineUsers.IndexOf(userItem);
+                            onlineUsers[idx] = new OnlineUserItem
+                            {
+                                UserId = userItem.UserId,
+                                UserName = renamedPayload.NewUserName,
+                                IsOwner = userItem.IsOwner,
+                                CanModerate = userItem.CanModerate
+                            };
+                            break;
+                        }
+                    }
+                    UpdateOnlineUserVisuals();
                     break;
             }
         }
@@ -906,6 +1026,7 @@ public sealed partial class MainWindow
             payload.StrokeId,
             payload.X,
             payload.Y,
+            payload.UserId,
             payload.UserName,
             payload.ColorHex,
             payload.Thickness,
@@ -929,6 +1050,7 @@ public sealed partial class MainWindow
                         command.StrokeId,
                         command.X,
                         command.Y,
+                        command.UserId,
                         command.UserName,
                         command.ColorHex,
                         command.Thickness,
@@ -940,6 +1062,7 @@ public sealed partial class MainWindow
                         command.StrokeId,
                         command.X,
                         command.Y,
+                        command.UserId,
                         command.UserName,
                         command.ColorHex,
                         command.Thickness,
@@ -951,6 +1074,7 @@ public sealed partial class MainWindow
                         command.StrokeId,
                         command.X,
                         command.Y,
+                        command.UserId,
                         command.UserName,
                         command.ColorHex,
                         command.Thickness,

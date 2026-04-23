@@ -25,7 +25,7 @@ internal sealed class ConnectedClient : IAsyncDisposable
 
 	public string UserId { get; }
 
-	public string UserName { get; }
+	public string UserName { get; set; }
 
 	public TcpClient TcpClient { get; }
 

@@ -5,13 +5,15 @@ namespace Btl.Whiteboard.Client.Networking;
 
 public sealed class TcpWhiteboardSession : IAsyncDisposable
 {
-    private const int MaxUserNameLength = 36;
-    private const int MaxChatLength = 400;
-    private const int MaxStrokeIdLength = 80;
-    private const int MaxLayerIdLength = 80;
-    private const int MaxColorHexLength = 16;
-    private const double MinStrokeThickness = 1;
-    private const double MaxStrokeThickness = 24;
+    private sealed class TerminalConnectionException(string message) : InvalidOperationException(message);
+
+    private const int MaxUserNameLength = ProtocolConstants.MaxUserNameLength;
+    private const int MaxChatLength = ProtocolConstants.MaxChatLength;
+    private const int MaxStrokeIdLength = ProtocolConstants.MaxStrokeIdLength;
+    private const int MaxLayerIdLength = ProtocolConstants.MaxLayerIdLength;
+    private const int MaxColorHexLength = ProtocolConstants.MaxColorHexLength;
+    private const double MinStrokeThickness = ProtocolConstants.MinStrokeThickness;
+    private const double MaxStrokeThickness = ProtocolConstants.MaxStrokeThickness;
     private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan HeartbeatTimeout = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan ReconnectBaseDelay = TimeSpan.FromMilliseconds(500);
@@ -31,9 +33,14 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
     private DateTimeOffset lastReceiveAtUtc;
     private bool isManualDisconnect;
     private int reconnectAttempt;
+    private bool reconnectSuppressed;
+    private bool handshakeCompleted;
+    private bool roomStateReceived;
     private string configuredHost = string.Empty;
     private int configuredPort;
     private string configuredUserName = "Guest";
+    private string? configuredPassword;
+    private TaskCompletionSource<bool>? handshakeSource;
 
     public event EventHandler<WhiteboardEnvelope>? EnvelopeReceived;
 
@@ -41,12 +48,20 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
 
     public bool IsConnected => tcpClient is { Connected: true } && stream is not null;
 
-    public async Task ConnectAsync(string host, int port, string userName, CancellationToken cancellationToken)
+    public string LocalSenderId => localSenderId;
+
+    public async Task ConnectAsync(string host, int port, string userName, string? password, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(host))
         {
             throw new InvalidOperationException("Host is required.");
         }
+
+        // Cancel before acquiring the gate. ReconnectLoopAsync holds the gate while
+        // waiting on Task.Delay; cancelling here lets it exit the delay and release
+        // the gate, breaking the deadlock where ConnectAsync and the reconnect loop
+        // each wait for the other.
+        lifecycleSource?.Cancel();
 
         await reconnectGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -59,10 +74,13 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
             configuredHost = host.Trim();
             configuredPort = port;
             configuredUserName = NormalizeUserName(userName);
+            configuredPassword = password;
             isManualDisconnect = false;
             reconnectAttempt = 0;
+            reconnectSuppressed = false;
+            handshakeCompleted = false;
+            roomStateReceived = false;
 
-            lifecycleSource?.Cancel();
             lifecycleSource?.Dispose();
             lifecycleSource = new CancellationTokenSource();
 
@@ -72,11 +90,11 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
                 configuredHost,
                 configuredPort,
                 configuredUserName,
+                configuredPassword,
                 cancellationToken,
                 lifecycleSource.Token).ConfigureAwait(false);
 
             StartHeartbeatLoop();
-            ConnectionStateChanged?.Invoke(this, "Connected");
         }
         finally
         {
@@ -92,6 +110,7 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
         receiveLoopSource?.Cancel();
 
         CloseSocket();
+        handshakeSource?.TrySetCanceled();
 
         if (receiveLoopTask is not null)
         {
@@ -125,6 +144,19 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
         ConnectionStateChanged?.Invoke(this, "Disconnected");
     }
 
+    public Task SendUserRenamedAsync(string newUserName, CancellationToken cancellationToken)
+    {
+        string safeName = NormalizeUserName(newUserName);
+
+        WhiteboardEnvelope envelope = WhiteboardEnvelope.Create(
+            WhiteboardMessageType.UserRenamed,
+            localSenderId,
+            NextSequence(),
+            new UserRenamedPayload(localSenderId, safeName));
+
+        return SendEnvelopeAsync(envelope, cancellationToken);
+    }
+
     public Task SendChatAsync(string userName, string text, CancellationToken cancellationToken)
     {
         string safeUserName = NormalizeUserName(userName);
@@ -143,6 +175,7 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
         string strokeId,
         double x,
         double y,
+        string userId,
         string userName,
         string colorHex,
         double thickness,
@@ -158,7 +191,7 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
             WhiteboardMessageType.StrokeStart,
             localSenderId,
             NextSequence(),
-            new StrokeStartPayload(strokeId, x, y, NormalizeUserName(userName), safeColorHex, safeThickness, safeLayerId));
+            new StrokeStartPayload(strokeId, x, y, userId, NormalizeUserName(userName), safeColorHex, safeThickness, safeLayerId));
 
         return SendEnvelopeAsync(envelope, cancellationToken);
     }
@@ -167,6 +200,7 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
         string strokeId,
         double x,
         double y,
+        string userId,
         string userName,
         string colorHex,
         double thickness,
@@ -182,7 +216,7 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
             WhiteboardMessageType.StrokePoint,
             localSenderId,
             NextSequence(),
-            new StrokePointPayload(strokeId, x, y, NormalizeUserName(userName), safeColorHex, safeThickness, safeLayerId));
+            new StrokePointPayload(strokeId, x, y, userId, NormalizeUserName(userName), safeColorHex, safeThickness, safeLayerId));
 
         return SendEnvelopeAsync(envelope, cancellationToken);
     }
@@ -191,6 +225,7 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
         string strokeId,
         double x,
         double y,
+        string userId,
         string userName,
         string colorHex,
         double thickness,
@@ -206,7 +241,7 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
             WhiteboardMessageType.StrokeEnd,
             localSenderId,
             NextSequence(),
-            new StrokeEndPayload(strokeId, x, y, NormalizeUserName(userName), safeColorHex, safeThickness, safeLayerId));
+            new StrokeEndPayload(strokeId, x, y, userId, NormalizeUserName(userName), safeColorHex, safeThickness, safeLayerId));
 
         return SendEnvelopeAsync(envelope, cancellationToken);
     }
@@ -233,6 +268,117 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
         return SendEnvelopeAsync(envelope, cancellationToken);
     }
 
+    public Task SendKickUserAsync(string targetUserId, string reason, CancellationToken cancellationToken)
+    {
+        WhiteboardEnvelope envelope = WhiteboardEnvelope.Create(
+            WhiteboardMessageType.KickUser,
+            localSenderId,
+            NextSequence(),
+            new KickPayload(targetUserId, reason));
+
+        return SendEnvelopeAsync(envelope, cancellationToken);
+    }
+
+    public Task SendBanUserAsync(string targetUserId, string reason, CancellationToken cancellationToken)
+    {
+        WhiteboardEnvelope envelope = WhiteboardEnvelope.Create(
+            WhiteboardMessageType.BanUser,
+            localSenderId,
+            NextSequence(),
+            new BanPayload(targetUserId, reason));
+
+        return SendEnvelopeAsync(envelope, cancellationToken);
+    }
+
+    public Task SendUnbanUserAsync(string targetUserId, string reason, CancellationToken cancellationToken)
+    {
+        WhiteboardEnvelope envelope = WhiteboardEnvelope.Create(
+            WhiteboardMessageType.UnbanUser,
+            localSenderId,
+            NextSequence(),
+            new UnbanPayload(targetUserId, reason));
+
+        return SendEnvelopeAsync(envelope, cancellationToken);
+    }
+
+    public Task SendClearCanvasAsync(CancellationToken cancellationToken)
+    {
+        WhiteboardEnvelope envelope = WhiteboardEnvelope.Create(
+            WhiteboardMessageType.ClearCanvas,
+            localSenderId,
+            NextSequence(),
+            new ClearCanvasPayload());
+
+        return SendEnvelopeAsync(envelope, cancellationToken);
+    }
+
+    public Task SendLockRoomAsync(string reason, CancellationToken cancellationToken)
+    {
+        string normalizedReason = (reason ?? string.Empty).Trim();
+        WhiteboardEnvelope envelope = WhiteboardEnvelope.Create(
+            WhiteboardMessageType.LockRoom,
+            localSenderId,
+            NextSequence(),
+            new LockRoomPayload(normalizedReason));
+
+        return SendEnvelopeAsync(envelope, cancellationToken);
+    }
+
+    public Task SendUnlockRoomAsync(CancellationToken cancellationToken)
+    {
+        WhiteboardEnvelope envelope = WhiteboardEnvelope.Create(
+            WhiteboardMessageType.UnlockRoom,
+            localSenderId,
+            NextSequence(),
+            new UnlockRoomPayload());
+
+        return SendEnvelopeAsync(envelope, cancellationToken);
+    }
+
+    public async Task<ReserveRoomPasswordResultPayload> ReserveRoomPasswordAsync(
+        string host,
+        int port,
+        string password,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            throw new InvalidOperationException("Host is required.");
+        }
+
+        using TcpClient reservationClient = new();
+        reservationClient.NoDelay = true;
+        await reservationClient.ConnectAsync(host.Trim(), port, cancellationToken).ConfigureAwait(false);
+
+        NetworkStream reservationStream = reservationClient.GetStream();
+        WhiteboardEnvelope reserveEnvelope = WhiteboardEnvelope.Create(
+            WhiteboardMessageType.ReserveRoomPassword,
+            localSenderId,
+            0,
+            new ReserveRoomPasswordPayload(localSenderId, password));
+
+        await FrameProtocol.WriteAsync(reservationStream, reserveEnvelope, cancellationToken).ConfigureAwait(false);
+
+        WhiteboardEnvelope? responseEnvelope = await FrameProtocol.ReadAsync(reservationStream, cancellationToken).ConfigureAwait(false);
+        if (responseEnvelope is null)
+        {
+            throw new InvalidOperationException("Server closed the reservation request before responding.");
+        }
+
+        if (responseEnvelope.Type == WhiteboardMessageType.Error)
+        {
+            ErrorPayload errorPayload = responseEnvelope.ReadPayload<ErrorPayload>();
+            throw new InvalidOperationException(errorPayload.Message);
+        }
+
+        if (responseEnvelope.Type != WhiteboardMessageType.ReserveRoomPasswordResult)
+        {
+            throw new InvalidOperationException($"Unexpected reservation response: {responseEnvelope.Type}.");
+        }
+
+        return responseEnvelope.ReadPayload<ReserveRoomPasswordResultPayload>();
+    }
+
     public async ValueTask DisposeAsync()
     {
         await DisconnectAsync().ConfigureAwait(false);
@@ -244,6 +390,7 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
         string host,
         int port,
         string userName,
+        string? password,
         CancellationToken externalToken,
         CancellationToken lifecycleToken)
     {
@@ -258,6 +405,7 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
         receiveLoopSource?.Cancel();
         receiveLoopSource?.Dispose();
         receiveLoopSource = CancellationTokenSource.CreateLinkedTokenSource(lifecycleToken);
+        handshakeSource = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         tcpClient = newClient;
         stream = newStream;
@@ -269,9 +417,10 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
             WhiteboardMessageType.Hello,
             localSenderId,
             NextSequence(),
-            new HelloPayload(userName, DiscoveryProtocol.CurrentProtocolVersion));
+            new HelloPayload(localSenderId, userName, DiscoveryProtocol.CurrentProtocolVersion, password));
 
         await SendEnvelopeAsync(helloEnvelope, connectSource.Token).ConfigureAwait(false);
+        await WaitForHandshakeAsync(connectSource.Token).ConfigureAwait(false);
     }
 
     private async Task RunReceiveLoopAsync(CancellationToken cancellationToken)
@@ -315,6 +464,80 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
                     continue;
                 }
 
+                if (envelope.Type == WhiteboardMessageType.KickUser)
+                {
+                    KickPayload kickPayload = envelope.ReadPayload<KickPayload>();
+                    string reason = string.IsNullOrWhiteSpace(kickPayload.Reason)
+                        ? "You were kicked from the room."
+                        : $"You were kicked: {kickPayload.Reason}";
+                    StopReconnectAndReset($"Kicked: {reason}");
+                    break;
+                }
+
+                if (envelope.Type == WhiteboardMessageType.BanUser)
+                {
+                    BanPayload banPayload = envelope.ReadPayload<BanPayload>();
+                    string reason = string.IsNullOrWhiteSpace(banPayload.Reason)
+                        ? "You were banned from the room."
+                        : $"You were banned: {banPayload.Reason}";
+                    StopReconnectAndReset($"Banned: {reason}");
+                    break;
+                }
+
+                if (envelope.Type == WhiteboardMessageType.OwnerAssigned)
+                {
+                    EnvelopeReceived?.Invoke(this, envelope);
+                    continue;
+                }
+
+                if (envelope.Type == WhiteboardMessageType.RoomStateInfo)
+                {
+                    roomStateReceived = true;
+                    CompleteHandshakeIfNeeded();
+                    EnvelopeReceived?.Invoke(this, envelope);
+                    continue;
+                }
+
+                if (envelope.Type == WhiteboardMessageType.Error)
+                {
+                    ErrorPayload errorPayload = envelope.ReadPayload<ErrorPayload>();
+                    if (string.Equals(errorPayload.Code, "BANNED", StringComparison.OrdinalIgnoreCase))
+                    {
+                        StopReconnectAndReset($"Banned: {errorPayload.Message}");
+                        break;
+                    }
+
+                    if (string.Equals(errorPayload.Code, "AUTH_FAILED", StringComparison.OrdinalIgnoreCase))
+                    {
+                        StopReconnectAndReset($"Authentication failed: {errorPayload.Message}");
+                        break;
+                    }
+
+                    ConnectionStateChanged?.Invoke(this, $"Server error: {errorPayload.Message}");
+                    continue;
+                }
+
+                if (envelope.Type == WhiteboardMessageType.RoomLocked)
+                {
+                    RoomLockedPayload roomLockedPayload = envelope.ReadPayload<RoomLockedPayload>();
+                    string reason = string.IsNullOrWhiteSpace(roomLockedPayload.Reason)
+                        ? "Room is locked by owner."
+                        : roomLockedPayload.Reason;
+                    if (!handshakeCompleted)
+                    {
+                        StopReconnectAndReset($"Room locked: {reason}");
+                        break;
+                    }
+
+                    EnvelopeReceived?.Invoke(this, envelope);
+                    continue;
+                }
+
+                if (!handshakeCompleted && roomStateReceived)
+                {
+                    CompleteHandshakeIfNeeded();
+                }
+
                 EnvelopeReceived?.Invoke(this, envelope);
             }
         }
@@ -326,15 +549,25 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
         }
         catch (InvalidDataException exception)
         {
+            handshakeSource?.TrySetException(exception);
             ConnectionStateChanged?.Invoke(this, $"Connection error: protocol/frame mismatch. {exception.Message}");
         }
         catch (Exception exception)
         {
+            handshakeSource?.TrySetException(exception);
             ConnectionStateChanged?.Invoke(this, $"Connection error: {exception.Message}");
         }
         finally
         {
-            shouldReconnect = !isManualDisconnect && lifecycleSource is { IsCancellationRequested: false };
+            if (!handshakeCompleted)
+            {
+                string message = roomStateReceived
+                    ? "Server closed the connection before confirming the session."
+                    : "Server closed the connection before sending room state.";
+                handshakeSource?.TrySetException(new InvalidOperationException(message));
+            }
+
+            shouldReconnect = !isManualDisconnect && !reconnectSuppressed && lifecycleSource is { IsCancellationRequested: false };
             CleanupConnection();
         }
 
@@ -429,20 +662,27 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
 
                 try
                 {
+                    reconnectSuppressed = false;
+                    handshakeCompleted = false;
                     await OpenConnectionAsync(
                         configuredHost,
                         configuredPort,
                         configuredUserName,
+                        configuredPassword,
                         cancellationToken,
                         cancellationToken).ConfigureAwait(false);
 
                     reconnectAttempt = 0;
                     StartHeartbeatLoop();
-                    ConnectionStateChanged?.Invoke(this, "Connected");
                     return;
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
+                    return;
+                }
+                catch (TerminalConnectionException exception)
+                {
+                    ConnectionStateChanged?.Invoke(this, exception.Message);
                     return;
                 }
                 catch (Exception exception)
@@ -515,6 +755,7 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
     private void ForceConnectionReset()
     {
         receiveLoopSource?.Cancel();
+        handshakeSource?.TrySetException(new InvalidOperationException("Connection reset."));
         CloseSocket();
     }
 
@@ -556,6 +797,40 @@ public sealed class TcpWhiteboardSession : IAsyncDisposable
         receiveLoopSource = null;
 
         receiveLoopTask = null;
+        handshakeSource = null;
+        roomStateReceived = false;
+    }
+
+    private async Task WaitForHandshakeAsync(CancellationToken cancellationToken)
+    {
+        TaskCompletionSource<bool>? currentHandshakeSource = handshakeSource;
+        if (currentHandshakeSource is null)
+        {
+            return;
+        }
+
+        using CancellationTokenRegistration registration = cancellationToken.Register(() => currentHandshakeSource.TrySetCanceled(cancellationToken));
+        await currentHandshakeSource.Task.ConfigureAwait(false);
+    }
+
+    private void CompleteHandshakeIfNeeded()
+    {
+        if (handshakeCompleted)
+        {
+            return;
+        }
+
+        handshakeCompleted = true;
+        handshakeSource?.TrySetResult(true);
+        ConnectionStateChanged?.Invoke(this, "Connected");
+    }
+
+    private void StopReconnectAndReset(string state)
+    {
+        reconnectSuppressed = true;
+        handshakeSource?.TrySetException(new TerminalConnectionException(state));
+        ConnectionStateChanged?.Invoke(this, state);
+        ForceConnectionReset();
     }
 
     private static string NormalizeUserName(string userName)

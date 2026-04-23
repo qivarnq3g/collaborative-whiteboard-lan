@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -8,9 +8,11 @@ using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using Windows.Foundation;
+using Windows.System;
 
 namespace Btl.Whiteboard.Client;
 
@@ -41,6 +43,11 @@ public sealed partial class MainWindow
 
     private void UpdateToolStatusText()
     {
+        if (CurrentToolTextBlock is null)
+        {
+            return;
+        }
+
         string colorLabel = GetEffectiveStrokeColorHex();
         double thickness = GetEffectiveStrokeThickness();
         LayerState activeLayer = GetActiveLayerState();
@@ -401,6 +408,7 @@ public sealed partial class MainWindow
         }
 
         string strokeId = Guid.NewGuid().ToString("N");
+        string userId = session.LocalSenderId;
         string userName = GetSafeUserName();
         string colorHex = GetEffectiveStrokeColorHex();
         double thickness = GetEffectiveStrokeThickness();
@@ -414,6 +422,7 @@ public sealed partial class MainWindow
                 strokeId,
                 first.X,
                 first.Y,
+                userId,
                 userName,
                 colorHex,
                 thickness,
@@ -427,6 +436,7 @@ public sealed partial class MainWindow
                     strokeId,
                     point.X,
                     point.Y,
+                    userId,
                     userName,
                     colorHex,
                     thickness,
@@ -439,6 +449,7 @@ public sealed partial class MainWindow
                 strokeId,
                 last.X,
                 last.Y,
+                userId,
                 userName,
                 colorHex,
                 thickness,
@@ -493,7 +504,7 @@ public sealed partial class MainWindow
 
     private void UpdateCanvasPointerText(Point point)
     {
-        CanvasPointerTextBlock.Text = $"X:{Math.Round(point.X)} Y:{Math.Round(point.Y)}";
+        // Pointer coordinates display removed for cleaner UI
     }
 
     private string GetSelectedStrokeColorHex()
@@ -508,12 +519,102 @@ public sealed partial class MainWindow
 
     private double GetSelectedStrokeThickness()
     {
-        if (StrokeThicknessComboBox.SelectedItem is ComboBoxItem selected &&
-            double.TryParse(selected.Tag as string, NumberStyles.Float, CultureInfo.InvariantCulture, out double thickness))
+        if (StrokeThicknessNumberBox is not null && !double.IsNaN(StrokeThicknessNumberBox.Value))
         {
-            return NormalizeStrokeThickness(thickness);
+            return NormalizeStrokeThickness(StrokeThicknessNumberBox.Value);
         }
 
         return NormalizeStrokeThickness(DefaultStrokeThickness);
     }
+
+
+    private void StrokeColorComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (isUpdatingColorSelection)
+        {
+            return;
+        }
+
+        ApplySelectedColorHex(GetSelectedStrokeColorHex(), syncComboSelection: false, trackRecent: true);
+    }
+
+
+    private void StrokeThicknessNumberBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        selectedStrokeThickness = GetSelectedStrokeThickness();
+        UpdateToolStatusText();
+    }
+
+
+    private void CustomColorTextBox_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != VirtualKey.Enter)
+        {
+            return;
+        }
+
+        e.Handled = true;
+        ApplyCustomColorFromInput();
+    }
+
+
+    private void ApplyCustomColorButton_Click(object sender, RoutedEventArgs e)
+    {
+        ApplyCustomColorFromInput();
+    }
+
+
+    private void ColorSwatchButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button colorButton || colorButton.Tag is not string swatchHex)
+        {
+            return;
+        }
+
+        ApplySelectedColorHex(swatchHex, syncComboSelection: true, trackRecent: true);
+    }
+
+
+    private void AdvancedColorPicker_ColorChanged(ColorPicker sender, ColorChangedEventArgs args)
+    {
+        if (isUpdatingColorSelection)
+        {
+            return;
+        }
+
+        string colorHex = ToHexColor(args.NewColor);
+        ApplySelectedColorHex(colorHex, syncComboSelection: true, trackRecent: false);
+    }
+
+
+    private void AdvancedColorPickerFlyout_Closed(object sender, object e)
+    {
+        TrackRecentColor(selectedStrokeColorHex);
+        RefreshColorSwatchSelection();
+    }
+
+
+    private void ToolToggleButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not ToggleButton toolButton)
+        {
+            return;
+        }
+
+        DrawingTool tool = toolButton.Name switch
+        {
+            nameof(LineToolToggleButton) => DrawingTool.Line,
+            nameof(RectangleToolToggleButton) => DrawingTool.Rectangle,
+            nameof(EllipseToolToggleButton) => DrawingTool.Ellipse,
+            nameof(EraserToolToggleButton) => DrawingTool.Eraser,
+            _ => DrawingTool.Pencil
+        };
+
+        SelectDrawingTool(tool);
+    }
+
+
+
+
+
 }
