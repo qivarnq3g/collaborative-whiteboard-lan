@@ -1,17 +1,40 @@
-.github/
+# IDE and user settings
 .vs/
 .vscode/
-**/bin/
-**/obj/
 *.csproj.user
 *.sln.user
+*.slnLaunch.user
+*.suo
+
+# Build outputs
+.artifacts/
+**/bin/
+**/obj/
 *.pdb
-build_diag.log
-WindowsAppRuntimeInstall-x64.exe
-**/chatagent-temp/
-**/Validation/Debug/
+*.log
+TestResults/
+coverage/
+
+# Local configuration and secrets
 .env
-.env.local
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.snk
+
+# Local reports and submission packages
+*.zip
+*.rar
+*.docx
+*.pdf
+DEMO_REPORT.md
+DEMO_TEST_REPORT_TEMPLATE.md
+PROJECT_STUDY_GUIDE.md
+VIVA_QA.md
+screenshots/
+
+# OS files
 .DS_Store
 Thumbs.db
-DEMO_TEST_REPORT_TEMPLATE.md
+Desktop.ini
